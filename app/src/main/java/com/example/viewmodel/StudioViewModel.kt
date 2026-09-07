@@ -20,6 +20,13 @@ data class StudioUiState(
     val recordDurationMs: Long = 0L,
     val isSidebarOpen: Boolean = true,
     val isFullCanvasMode: Boolean = false,
+    /**
+     * STUDIO UI visibility ONLY — whether the Studio chrome (top strip, sidebar, floating
+     * transport controls, floating timeline bar) is shown over/around the canvas workspace.
+     * This is deliberately NOT source visibility: it never touches Layer.isVisible, playback,
+     * recording, or any project data. Hiding the chrome gives the canvas the full workspace.
+     */
+    val showStudioChrome: Boolean = true,
     val showStatsOverlay: Boolean = false,
     val audioSettings: AudioSettings = AudioSettings(),
     val torchMode: TorchMode = TorchMode.OFF,
@@ -164,9 +171,22 @@ class StudioViewModel : ViewModel() {
             val willBeFull = !it.isFullCanvasMode
             it.copy(
                 isFullCanvasMode = willBeFull,
+                // Entering the canvas workspace hides Studio chrome; exiting restores it.
+                // Only chrome state changes here — layers, playback, recording and transforms
+                // are never touched.
+                showStudioChrome = if (willBeFull) false else true,
                 isSidebarOpen = if (willBeFull) false else it.isSidebarOpen
             )
         }
+    }
+
+    /**
+     * Show/hide the STUDIO CHROME only (eye control in the canvas workspace).
+     * Intentionally does not change [isFullCanvasMode] and must never change source
+     * visibility, playback, recording state, transforms, or the project itself.
+     */
+    fun toggleStudioChrome() {
+        _uiState.update { it.copy(showStudioChrome = !it.showStudioChrome) }
     }
 
     // --- Playback & Transport ---

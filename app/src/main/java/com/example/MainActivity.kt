@@ -140,6 +140,12 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
         }
     }
 
+    // Inside the canvas workspace with Studio chrome hidden, Back first restores the floating
+    // timeline + transport (chrome); a second Back then exits full canvas via the handler above.
+    BackHandler(enabled = uiState.isFullCanvasMode && !uiState.showStudioChrome) {
+        viewModel.toggleStudioChrome()
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = StudioDark,
@@ -151,8 +157,9 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                 .padding(innerPadding)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Top Strip (48dp height)
-                if (!uiState.isFullCanvasMode) {
+                // Top Strip (48dp height) — Studio chrome: hidden while the canvas owns the
+                // full workspace; the eye control restores it inside the workspace.
+                if (!uiState.isFullCanvasMode || uiState.showStudioChrome) {
                     TopStrip(
                         projectName = uiState.project.name,
                         aspectRatio = uiState.project.aspectRatio,
@@ -189,9 +196,10 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    // Collapsible Hierarchical Sidebar
+                    // Collapsible Hierarchical Sidebar (Studio chrome — hidden while the canvas
+                    // owns the full workspace)
                     AnimatedVisibility(
-                        visible = uiState.isSidebarOpen && !uiState.isFullCanvasMode,
+                        visible = uiState.isSidebarOpen && (!uiState.isFullCanvasMode || uiState.showStudioChrome),
                         enter = slideInHorizontally(
                             initialOffsetX = { -it },
                             animationSpec = tween(220)
@@ -233,9 +241,11 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                             isPlaying = uiState.isPlaying,
                             currentPositionMs = uiState.currentPositionMs,
                             isRecording = uiState.isRecording,
+                            recordDurationMs = uiState.recordDurationMs,
                             showStatsOverlay = uiState.showStatsOverlay,
                             stats = uiState.stats,
                             isFullCanvasMode = uiState.isFullCanvasMode,
+                            showStudioChrome = uiState.showStudioChrome,
                             onSelectLayer = { viewModel.selectLayer(it) },
                             onUpdateTransform = { id, transform ->
                                 viewModel.updateTransform(id, transform)
@@ -245,6 +255,7 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                             },
                             onSeek = { viewModel.seekTo(it) },
                             onToggleFullCanvas = { viewModel.toggleFullCanvasMode() },
+                            onToggleStudioChrome = { viewModel.toggleStudioChrome() },
                             onAutoFillSelected = { viewModel.autoFillSelectedLayer() },
                             onFitFrameSelected = { viewModel.fitSelectedToFrame() },
                             onCenterSelected = { viewModel.centerSelectedLayer() },
@@ -257,12 +268,14 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                             onPlayPause = { viewModel.togglePlayPause() }
                         )
 
-                        // Floating Transport Controls (Bottom-Right on canvas)
+                        // Floating Transport Controls (Bottom-Right on canvas) — Studio chrome:
+                        // hidden in the canvas workspace; while recording without chrome the
+                        // canvas shows only a small REC indicator (see StageView).
                         FloatingControls(
                             isPlaying = uiState.isPlaying,
                             isRecording = uiState.isRecording,
                             recordDurationMs = uiState.recordDurationMs,
-                            isVisible = !uiState.isFullCanvasMode,
+                            isVisible = !uiState.isFullCanvasMode || uiState.showStudioChrome,
                             onPlayPause = { viewModel.togglePlayPause() },
                             onStop = { viewModel.stop() },
                             onRecord = { viewModel.toggleRecording() },

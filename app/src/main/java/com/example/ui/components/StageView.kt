@@ -189,14 +189,17 @@ fun StageView(
     isPlaying: Boolean,
     currentPositionMs: Long,
     isRecording: Boolean,
+    recordDurationMs: Long = 0L,
     showStatsOverlay: Boolean,
     stats: StatsInfo,
     isFullCanvasMode: Boolean = false,
+    showStudioChrome: Boolean = true,
     onSelectLayer: (String?) -> Unit,
     onUpdateTransform: (String, LayerTransform) -> Unit,
     onDoubleTapText: (String) -> Unit,
     onSeek: (Long) -> Unit,
     onToggleFullCanvas: () -> Unit = {},
+    onToggleStudioChrome: () -> Unit = {},
     onAutoFillSelected: () -> Unit = {},
     onFitFrameSelected: () -> Unit = {},
     onCenterSelected: () -> Unit = {},
@@ -254,10 +257,15 @@ fun StageView(
             },
         contentAlignment = Alignment.Center
     ) {
-        // Compute fitted canvas dimensions preserving project aspect ratio
+        // Compute fitted canvas dimensions preserving project aspect ratio. The project's
+        // aspect ratio is only used to fit the canvas inside the available space — Full Canvas
+        // changes how much space the canvas is given, never the project's ratio or source coords.
+        // When Studio chrome is hidden there are no floating bars over the stage, so the canvas
+        // is no longer inset for them and uses the maximum available area.
         val targetRatio = project.aspectRatio.ratio
-        val availW = if (isFullCanvasMode) maxWidth else (maxWidth - 8.dp).coerceAtLeast(100.dp)
-        val availH = if (isFullCanvasMode) maxHeight else (maxHeight - 48.dp).coerceAtLeast(100.dp)
+        val workspaceImmersive = isFullCanvasMode && !showStudioChrome
+        val availW = if (workspaceImmersive) maxWidth else (maxWidth - 8.dp).coerceAtLeast(100.dp)
+        val availH = if (workspaceImmersive) maxHeight else (maxHeight - 48.dp).coerceAtLeast(100.dp)
 
         val (canvasWidthDp, canvasHeightDp) = remember(availW, availH, targetRatio) {
             val availRatio = availW.value / availH.value
@@ -504,40 +512,132 @@ fun StageView(
             }
         }
 
-        // --- FLOATING FULL CANVAS TOGGLE BUTTON (Top-Right) ---
+        // --- FLOATING WORKSPACE CONTROLS (Top-Right): existing Full Canvas toggle, extended
+        // in place with the ONE small eye control that shows/hides STUDIO CHROME only.
+        // These buttons never touch layer/source visibility — they only change Studio chrome.
         Surface(
             color = if (isFullCanvasMode) StudioCyan else Color.Black.copy(alpha = 0.75f),
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, if (isFullCanvasMode) Color.Transparent else Color.White.copy(alpha = 0.2f)),
+            border = BorderStroke(1.dp, if (isFullCanvasMode && !workspaceImmersive) Color.Transparent else Color.White.copy(alpha = 0.2f)),
             shadowElevation = 6.dp,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(10.dp)
                 .clip(RoundedCornerShape(18.dp))
-                .clickable { onToggleFullCanvas() }
+                .then(
+                    // Outside immersive mode the whole pill keeps the original behavior:
+                    // one tap toggles Full Canvas (eye handled by its own hit target).
+                    if (!workspaceImmersive) Modifier.clickable { onToggleFullCanvas() } else Modifier
+                )
                 .testTag("stage_full_canvas_toggle")
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = if (isFullCanvasMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                    contentDescription = if (isFullCanvasMode) "Exit Full Canvas" else "Full Canvas Mode",
-                    tint = if (isFullCanvasMode) Color.Black else Color.White,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = if (isFullCanvasMode) "Exit Full" else "Full Canvas",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isFullCanvasMode) Color.Black else Color.White
-                )
+                if (!workspaceImmersive) {
+                    Icon(
+                        imageVector = if (isFullCanvasMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = if (isFullCanvasMode) "Exit Full Canvas" else "Full Canvas Mode",
+                        tint = if (isFullCanvasMode) Color.Black else Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (isFullCanvasMode) "Exit Full" else "Full Canvas",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isFullCanvasMode) Color.Black else Color.White
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    // Divider + ONE small eye button — Show/Hide STUDIO CONTROLS (not sources).
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(16.dp)
+                            .background(if (isFullCanvasMode) Color.Black.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.2f))
+                    )
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Icon(
+                        imageVector = Icons.Default.VisibilityOff,
+                        contentDescription = "Hide studio controls",
+                        tint = if (isFullCanvasMode) Color.Black else Color.White,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .clickable { onToggleStudioChrome() }
+                            .padding(5.dp)
+                            .testTag("studio_chrome_eye_button")
+                    )
+                } else {
+                    // Immersive canvas workspace: the pill shrinks to the ONE eye restore
+                    // control plus a compact exit-canvas glyph (same single pill, no new UI).
+                    Icon(
+                        imageVector = Icons.Default.Visibility,
+                        contentDescription = "Show studio controls",
+                        tint = StudioCyan,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(StudioCyan.copy(alpha = 0.18f))
+                            .clickable { onToggleStudioChrome() }
+                            .padding(6.dp)
+                            .testTag("studio_chrome_eye_button")
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.FullscreenExit,
+                        contentDescription = "Exit Full Canvas",
+                        tint = StudioCyan,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .clickable { onToggleFullCanvas() }
+                            .padding(6.dp)
+                    )
+                }
+            }
+        }
+
+        // --- SMALL RECORDING INDICATOR (only while Studio chrome is hidden) ---
+        // The recording pipeline is untouched: this simply mirrors uiState.isRecording /
+        // recordDurationMs so the state stays visible when the floating transport is hidden.
+        if (workspaceImmersive && isRecording) {
+            val recSecs = recordDurationMs / 1000
+            Surface(
+                color = Color(0xE60E1016),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, StudioRecordRed.copy(alpha = 0.7f)),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 54.dp, end = 10.dp)
+                    .testTag("workspace_rec_indicator")
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(StudioRecordRed)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "REC %02d:%02d".format(recSecs / 60, recSecs % 60),
+                        color = StudioRecordRed,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
 
         // --- BOTTOM TIMELINE SCRUB BAR ---
+        // Implementation untouched — visibility only. Its position/duration/playback state
+        // live in the ViewModel, so hiding and restoring the bar preserves the seek position.
+        if (showStudioChrome) {
         Surface(
             color = Color(0xD90E1016),
             shape = RoundedCornerShape(20.dp),
@@ -608,6 +708,7 @@ fun StageView(
                     )
                 }
             }
+        }
         }
 
         // --- HUD DIAGNOSTIC OVERLAY (Top-Left corner) ---
