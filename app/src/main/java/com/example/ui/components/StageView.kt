@@ -45,6 +45,7 @@ import coil.compose.AsyncImage
 import com.example.model.*
 import com.example.ui.theme.*
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.sin
 
 private enum class GestureMode { MOVE, RESIZE_CORNER, RESIZE_EDGE_H, RESIZE_EDGE_V, ROTATE }
@@ -206,9 +207,14 @@ fun StageView(
     onPlayPause: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // Live frame ticker animation for simulated video playback motion
-    val infiniteTransition = rememberInfiniteTransition(label = "video_motion")
-    val wavePhase by infiniteTransition.animateFloat(
+    // Live frame ticker animation for simulated video playback motion.
+    // Deliberately kept as a State<Float> that is only read *inside the Canvas draw scopes*
+    // of the layer visuals (never unwrapped here in the StageView body). Reading the value
+    // at this level used to recompose the whole stage tree on every animation frame — even
+    // while idle and during drags — which made canvas interaction feel heavy/stuttery.
+    // Draw-scope reads invalidate only the affected layers' redraw instead.
+    val waveTransition = rememberInfiniteTransition(label = "video_motion")
+    val wavePhase = waveTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
@@ -737,7 +743,7 @@ private fun BoxScope.LayerItemRenderer(
     layer: Layer,
     isSelected: Boolean,
     isPlaying: Boolean,
-    wavePhase: Float,
+    wavePhase: State<Float>,
     canvasWidthDp: Dp,
     canvasHeightDp: Dp,
     canvasWidthPx: Float,
@@ -792,7 +798,7 @@ private fun BoxScope.LayerItemRenderer(
             LayerType.VIDEO -> VideoLayerVisual(layer, isPlaying, wavePhase)
             LayerType.CAMERA -> CameraPiPLayerVisual(layer, isPlaying, wavePhase)
             LayerType.IMAGE -> ImageOverlayVisual(layer)
-            LayerType.SCREEN -> ScreenRecordVisual(layer, isPlaying, wavePhase)
+            LayerType.SCREEN -> ScreenRecordVisual(layer)
             LayerType.TEXT -> TextOverlayVisual(layer)
         }
     }
@@ -925,12 +931,17 @@ private fun RealVideoPlayer(
 }
 
 @Composable
-private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float) {
+private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: State<Float>) {
+    // A source only plays while the timeline transport plays AND the source itself is not
+    // paused via its contextual Play/Pause control (layer.isPlaying). The quick controls on
+    // the selection chrome toggle layer.isPlaying through toggleLayerPlaying — this is the
+    // actual rendering gate so that control has a real, visible effect.
+    val sourceActive = isPlaying && layer.isPlaying
     if (layer.mediaUri != null) {
         Box(modifier = Modifier.fillMaxSize()) {
             RealVideoPlayer(
                 uriString = layer.mediaUri,
-                isPlaying = isPlaying,
+                isPlaying = sourceActive,
                 volume = layer.volume,
                 isMuted = layer.isMuted,
                 playbackSpeed = layer.playbackSpeed,
@@ -946,9 +957,9 @@ private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float)
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Icon(
-                    imageVector = if (isPlaying) Icons.Default.PlayArrow else Icons.Default.Pause,
+                    imageVector = if (sourceActive) Icons.Default.PlayArrow else Icons.Default.Pause,
                     contentDescription = null,
-                    tint = StudioCyan,
+                    tint = if (sourceActive) StudioCyan else StudioTextSecondary,
                     modifier = Modifier.size(12.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -967,7 +978,8 @@ private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float)
                 .fillMaxSize()
                 .background(Color(0xFF131A2A))
         ) {
-            // Animated game/reaction background graphics
+            // Animated game/reaction background graphics. wavePhase is read inside this draw
+            // scope only, so the continuous tick redraws this layer without recomposing it.
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val w = size.width
                 val h = size.height
@@ -990,10 +1002,10 @@ private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float)
                 }
 
                 // Animated waveform when playing
-                if (isPlaying) {
-                    val waveOffset = (wavePhase * 0.05f) % 20f
+                if (sourceActive) {
+                    val phase = wavePhase.value
                     for (x in 0 until w.toInt() step 6) {
-                        val rad = (x + wavePhase * 2f) * 0.03f
+                        val rad = (x + phase * 2f) * 0.03f
                         val y = h * 0.5f + (sin(rad.toDouble()) * 20.0).toFloat()
                         drawCircle(
                             color = StudioCyan.copy(alpha = 0.4f),
@@ -1014,9 +1026,9 @@ private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float)
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Icon(
-                    imageVector = if (isPlaying) Icons.Default.PlayArrow else Icons.Default.Pause,
+                    imageVector = if (sourceActive) Icons.Default.PlayArrow else Icons.Default.Pause,
                     contentDescription = null,
-                    tint = StudioCyan,
+                    tint = if (sourceActive) StudioCyan else StudioTextSecondary,
                     modifier = Modifier.size(12.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -1032,7 +1044,10 @@ private fun VideoLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float)
 }
 
 @Composable
-private fun CameraPiPLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float) {
+private fun CameraPiPLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: State<Float>) {
+    // Live audio bars only animate when the timeline plays, the source is not paused through
+    // its contextual Play/Pause control, and the mic is not muted.
+    val sourceActive = isPlaying && layer.isPlaying
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1065,12 +1080,13 @@ private fun CameraPiPLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: Fl
                 size = Size(size.width * 0.70f, size.height * 0.40f)
             )
 
-            // Live audio bars indicator on camera
-            if (isPlaying && !layer.isMuted) {
+            // Live audio bars indicator on camera (wavePhase read in draw scope only)
+            if (sourceActive && !layer.isMuted) {
+                val phase = wavePhase.value
                 val barW = 4f
                 val spacing = 3f
                 for (i in 0..4) {
-                    val barH = (10f + (sin((wavePhase + i * 40f) * 0.1f) * 8f)).coerceAtLeast(4f)
+                    val barH = (10f + (sin((phase + i * 40f) * 0.1f) * 8f)).coerceAtLeast(4f)
                     drawRect(
                         color = StudioGreen,
                         topLeft = Offset(size.width - 24f + i * (barW + spacing), size.height - 18f - barH),
@@ -1146,7 +1162,7 @@ private fun ImageOverlayVisual(layer: Layer) {
 }
 
 @Composable
-private fun ScreenRecordVisual(layer: Layer, isPlaying: Boolean, wavePhase: Float) {
+private fun ScreenRecordVisual(layer: Layer) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1224,6 +1240,17 @@ private fun BoxScope.SelectionChrome(
     val layerLeft = canvasWidthDp * (t.cx - t.w / 2f)
     val layerTop = canvasHeightDp * (t.cy - t.h / 2f)
 
+    // Highest point of the chrome after rotation, measured in canvas dp. Used to decide where
+    // the source quick controls can live: when the layer sits flush with the canvas top (Auto
+    // Fill / Fit / background layers) the area above it is clipped by the rounded canvas, so
+    // the controls dock inside the source's top-right corner instead of becoming invisible.
+    val rotationRad = (t.rotationDeg % 360f) * (kotlin.math.PI.toFloat() / 180f)
+    val absSinRot = abs(sin(rotationRad))
+    val absCosRot = abs(cos(rotationRad))
+    val chromeVisualTopDp =
+        layerTop + layerHeight * (1f - absCosRot) / 2f - layerWidth * absSinRot / 2f
+    val quickControlsAbove = chromeVisualTopDp >= 44.dp
+
     Box(
         modifier = Modifier
             .offset(x = layerLeft, y = layerTop)
@@ -1231,16 +1258,16 @@ private fun BoxScope.SelectionChrome(
             .graphicsLayer {
                 rotationZ = t.rotationDeg
             }
-            .border(2.dp, StudioCyan, RoundedCornerShape(2.dp))
+            .border(2.dp, if (layer.isLocked) StudioAmber else StudioCyan, RoundedCornerShape(2.dp))
     ) {
         // Label Pill at top edge
         Surface(
-            color = StudioCyan,
+            color = if (layer.isLocked) StudioAmber else StudioCyan,
             shape = RoundedCornerShape(topStart = 0.dp, topEnd = 6.dp, bottomStart = 0.dp, bottomEnd = 6.dp),
             modifier = Modifier.align(Alignment.TopStart)
         ) {
             Text(
-                text = "${layer.type.name} • ${layer.name.take(14)}",
+                text = "${if (layer.isLocked) "🔒 " else ""}${layer.type.name} • ${layer.name.take(14)}",
                 color = Color.Black,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
@@ -1248,6 +1275,9 @@ private fun BoxScope.SelectionChrome(
             )
         }
 
+        // Handles and the rotation knob are only interactive (and only shown) for unlocked
+        // layers — a locked source must not display controls that silently do nothing.
+        if (!layer.isLocked) {
         // Center Move Handle (Explicit crosshair button for moving)
         Box(
             modifier = Modifier
@@ -1565,15 +1595,44 @@ private fun BoxScope.SelectionChrome(
                 )
             }
         }
+        } else {
+            // Locked source placeholder: position/size/rotation are locked, so replace the
+            // move handle with a clear lock chip (unlock from the sidebar SOURCE CONTROLS).
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .border(1.dp, StudioAmber, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Layer locked — unlock from the sidebar to move or resize",
+                    tint = StudioAmber,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
 
-        // Contextual source quick controls: Show/Hide + Play/Pause (reuses existing ViewModel ops)
+        // Contextual source quick controls: Show/Hide + Play/Pause (reuses existing ViewModel
+        // operations; visibility/playback remain available on locked sources). The pill floats
+        // above the source's top-right corner when the canvas has room, and docks inside the
+        // corner otherwise so it is never clipped away or left looking like a dead control.
         SelectionQuickControls(
             layer = layer,
             onToggleVisibility = onToggleVisibility,
             onTogglePlayPause = onTogglePlayPause,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .offset(x = (-4).dp, y = (-38).dp)
+            modifier = if (quickControlsAbove) {
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = (-4).dp, y = (-38).dp)
+            } else {
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = (-6).dp, y = 6.dp)
+            }
         )
     }
 }
