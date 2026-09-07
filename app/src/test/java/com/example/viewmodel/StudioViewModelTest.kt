@@ -120,19 +120,22 @@ class StudioViewModelTest {
     }
 
     @Test
-    fun `full canvas mode preserves the pre-existing sidebar open state on exit`() {
+    fun `full canvas mode collapses the sidebar on entry without changing its stored state`() {
         val viewModel = StudioViewModel()
         assertTrue(viewModel.uiState.value.isSidebarOpen)
 
         viewModel.toggleFullCanvasMode()
-        assertFalse(viewModel.uiState.value.isSidebarOpen)
+        assertFalse("Entering the workspace collapses the sidebar", viewModel.uiState.value.isSidebarOpen)
+        assertFalse(viewModel.uiState.value.showStudioChrome)
+        assertTrue(viewModel.uiState.value.isFullCanvasMode)
 
+        // Existing Studio behavior (unchanged by the workspace patch): exiting restores the
+        // chrome but leaves the sidebar where it was — the user re-opens it from the TopStrip.
         viewModel.toggleFullCanvasMode()
-        assertTrue(viewModel.uiState.value.isSidebarOpen)
+        assertTrue("Exiting restores Studio chrome", viewModel.uiState.value.showStudioChrome)
+        assertFalse("Sidebar stays as the user last left it", viewModel.uiState.value.isSidebarOpen)
 
-        viewModel.setSidebarOpen(false)
-        viewModel.toggleFullCanvasMode()
-        viewModel.toggleFullCanvasMode()
-        assertFalse("A sidebar that was closed stays closed", viewModel.uiState.value.isSidebarOpen)
+        viewModel.toggleSidebar()
+        assertTrue("Hamburger still re-opens the sidebar normally", viewModel.uiState.value.isSidebarOpen)
     }
 }
