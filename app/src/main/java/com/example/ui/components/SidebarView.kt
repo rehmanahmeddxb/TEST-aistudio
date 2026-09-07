@@ -182,9 +182,14 @@ fun SidebarView(
                             onClick = { viewModel.addSource(LayerType.IMAGE) }
                         )
                         SidebarActionItem(
-                            label = "Camera (Live)",
-                            icon = Icons.Default.Videocam,
-                            onClick = { viewModel.addSource(LayerType.CAMERA) }
+                            label = "Add Front Camera",
+                            icon = Icons.Default.CameraFront,
+                            onClick = { viewModel.addCameraSource(CameraFacing.FRONT) }
+                        )
+                        SidebarActionItem(
+                            label = "Add Back Camera",
+                            icon = Icons.Default.CameraAlt,
+                            onClick = { viewModel.addCameraSource(CameraFacing.BACK) }
                         )
                         SidebarActionItem(
                             label = "Screen Record",
@@ -333,6 +338,16 @@ fun SidebarView(
                         icon = if (selectedLayer.isPlaying) Icons.Default.PauseCircleOutline else Icons.Default.PlayCircleOutline,
                         onClick = { viewModel.toggleLayerPlaying(selectedLayer.id) }
                     )
+
+                    // 🔦 Torch Toggle (Camera layers only)
+                    if (selectedLayer.type == LayerType.CAMERA && selectedLayer.cameraFacing != null) {
+                        SidebarActionItem(
+                            label = if (selectedLayer.isTorchOn) "Torch OFF (${if (selectedLayer.cameraFacing == CameraFacing.FRONT) "Front" else "Back"})" else "Torch ON (${if (selectedLayer.cameraFacing == CameraFacing.FRONT) "Front" else "Back"})",
+                            icon = if (selectedLayer.isTorchOn) Icons.Default.FlashOff else Icons.Default.FlashOn,
+                            active = selectedLayer.isTorchOn,
+                            onClick = { viewModel.toggleCameraTorch(selectedLayer.id) }
+                        )
+                    }
 
                     // 🔄 Fit Mode ▸ Sub-Menu
                     val isFitExpanded = expandedItemIds.contains("sub_fit_mode")
@@ -720,9 +735,9 @@ fun SidebarView(
 
                 // Camera Take
                 SidebarActionItem(
-                    label = "Add Live Camera Take",
-                    icon = Icons.Default.Videocam,
-                    onClick = { viewModel.addSource(LayerType.CAMERA) }
+                    label = "Add Live Camera Take (Front)",
+                    icon = Icons.Default.CameraFront,
+                    onClick = { viewModel.addCameraSource(CameraFacing.FRONT) }
                 )
 
                 // Screen Record
@@ -1182,12 +1197,15 @@ private fun LayerRowItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Layer type icon
-        val typeIcon = when (layer.type) {
-            LayerType.CAMERA -> Icons.Default.Videocam
-            LayerType.VIDEO -> Icons.Default.Movie
-            LayerType.IMAGE -> Icons.Default.Image
-            LayerType.SCREEN -> Icons.Default.ScreenShare
-            LayerType.TEXT -> Icons.Default.TextFields
+        val typeIcon = when {
+            layer.type == LayerType.CAMERA && layer.cameraFacing == CameraFacing.FRONT -> Icons.Default.CameraFront
+            layer.type == LayerType.CAMERA && layer.cameraFacing == CameraFacing.BACK -> Icons.Default.CameraAlt
+            layer.type == LayerType.CAMERA -> Icons.Default.Videocam
+            layer.type == LayerType.VIDEO -> Icons.Default.Movie
+            layer.type == LayerType.IMAGE -> Icons.Default.Image
+            layer.type == LayerType.SCREEN -> Icons.Default.ScreenShare
+            layer.type == LayerType.TEXT -> Icons.Default.TextFields
+            else -> Icons.Default.Videocam
         }
         Icon(
             imageVector = typeIcon,

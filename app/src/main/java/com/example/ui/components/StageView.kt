@@ -5,6 +5,7 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.view.Surface
 import android.view.TextureView
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import com.example.camera.CameraManager
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -1048,55 +1050,131 @@ private fun CameraPiPLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: St
     // Live audio bars only animate when the timeline plays, the source is not paused through
     // its contextual Play/Pause control, and the mic is not muted.
     val sourceActive = isPlaying && layer.isPlaying
+    val facing = layer.cameraFacing
+    val facingLabel = when (facing) {
+        CameraFacing.FRONT -> "FRONT"
+        CameraFacing.BACK -> "BACK"
+        null -> "CAM"
+    }
+    val facingColor = when (facing) {
+        CameraFacing.FRONT -> StudioAmber
+        CameraFacing.BACK -> Color(0xFFEF4444)
+        null -> StudioAmber
+    }
+    // Track whether camera is actually bound and producing frames
+    var cameraBound by remember(layer.id) { mutableStateOf(CameraManager.isCameraActive(layer.id)) }
+    var cameraFailed by remember(layer.id) { mutableStateOf(false) }
+
+    // Periodically retry binding if camera isn't bound yet (handles async CameraManager init)
+    LaunchedEffect(layer.id, facing) {
+        if (facing == null || cameraFailed) return@LaunchedEffect
+        // Try up to 10 times over 5 seconds to bind the camera
+        for (attempt in 0..9) {
+            if (CameraManager.isCameraActive(layer.id)) {
+                cameraBound = true
+                return@LaunchedEffect
+            }
+            if (CameraManager.isInitialized) {
+                // CameraManager is ready but camera isn't bound - the AndroidView's factory/update
+                // will handle the actual binding since it has the PreviewView reference
+                cameraBound = true // Optimistic - the AndroidView will bind on next recompose
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(500L)
+        }
+        // After 10 attempts, mark as failed
+        cameraFailed = true
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .border(2.dp, StudioAmber, RoundedCornerShape(10.dp))
+            .border(2.dp, facingColor, RoundedCornerShape(10.dp))
             .background(Color(0xFF181C24))
     ) {
-        // Face silhouette / Live camera preview representation
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-
-            // Studio backdrop glow
-            drawCircle(
-                color = Color(0xFF262D3D),
-                radius = size.width * 0.45f,
-                center = Offset(cx, cy)
+        if (facing != null && !cameraFailed) {
+            // Real camera preview via CameraX PreviewView
+            AndroidView(
+                factory = { context ->
+                    val previewView = PreviewView(context).apply {
+                        this.scaleType = PreviewView.ScaleType.FILL_CENTER
+                        this.implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                    }
+                    // Bind camera immediately when PreviewView is created
+                    if (CameraManager.isInitialized) {
+                        val success = CameraManager.bindCamera(layer.id, facing, previewView)
+                        cameraBound = success
+                        if (!success) cameraFailed = true
+                    }
+                    previewView
+                },
+                update = { previewView ->
+                    // If camera wasn't bound initially (CameraManager wasn't ready), try again
+                    if (!CameraManager.isCameraActive(layer.id) && CameraManager.isInitialized && !cameraFailed) {
+                        val success = CameraManager.bindCamera(layer.id, facing, previewView)
+                        cameraBound = success
+                        if (!success) cameraFailed = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
             )
+        } else {
+            // Fallback: Face silhouette / placeholder when camera not available or failed
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = size.width / 2f
+                val cy = size.height / 2f
 
-            // Head silhouette
-            drawCircle(
-                color = Color(0xFF384358),
-                radius = size.width * 0.22f,
-                center = Offset(cx, cy - size.height * 0.08f)
-            )
+                // Studio backdrop glow
+                drawCircle(
+                    color = Color(0xFF262D3D),
+                    radius = size.width * 0.45f,
+                    center = Offset(cx, cy)
+                )
 
-            // Shoulders
-            drawOval(
-                color = Color(0xFF384358),
-                topLeft = Offset(cx - size.width * 0.35f, cy + size.height * 0.12f),
-                size = Size(size.width * 0.70f, size.height * 0.40f)
-            )
+                // Head silhouette
+                drawCircle(
+                    color = Color(0xFF384358),
+                    radius = size.width * 0.22f,
+                    center = Offset(cx, cy - size.height * 0.08f)
+                )
 
-            // Live audio bars indicator on camera (wavePhase read in draw scope only)
-            if (sourceActive && !layer.isMuted) {
-                val phase = wavePhase.value
-                val barW = 4f
-                val spacing = 3f
-                for (i in 0..4) {
-                    val barH = (10f + (sin((phase + i * 40f) * 0.1f) * 8f)).coerceAtLeast(4f)
-                    drawRect(
-                        color = StudioGreen,
-                        topLeft = Offset(size.width - 24f + i * (barW + spacing), size.height - 18f - barH),
-                        size = Size(barW, barH)
-                    )
+                // Shoulders
+                drawOval(
+                    color = Color(0xFF384358),
+                    topLeft = Offset(cx - size.width * 0.35f, cy + size.height * 0.12f),
+                    size = Size(size.width * 0.70f, size.height * 0.40f)
+                )
+
+                // Live audio bars indicator on camera (wavePhase read in draw scope only)
+                if (sourceActive && !layer.isMuted) {
+                    val phase = wavePhase.value
+                    val barW = 4f
+                    val spacing = 3f
+                    for (i in 0..4) {
+                        val barH = (10f + (sin((phase + i * 40f) * 0.1f) * 8f)).coerceAtLeast(4f)
+                        drawRect(
+                            color = StudioGreen,
+                            topLeft = Offset(size.width - 24f + i * (barW + spacing), size.height - 18f - barH),
+                            size = Size(barW, barH)
+                        )
+                    }
                 }
             }
         }
 
-        // "LIVE CAM" pill
+        // Torch indicator
+        if (layer.isTorchOn) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(Color.Yellow)
+            )
+        }
+
+        // Camera facing label pill
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -1109,12 +1187,12 @@ private fun CameraPiPLayerVisual(layer: Layer, isPlaying: Boolean, wavePhase: St
                 modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(StudioAmber)
+                    .background(if (cameraBound) StudioGreen else facingColor)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
-                text = "CAM 1",
-                color = StudioAmber,
+                text = facingLabel,
+                color = facingColor,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold
             )

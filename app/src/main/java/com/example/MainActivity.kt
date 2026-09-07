@@ -1,14 +1,18 @@
 package com.example
 
+import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -21,10 +25,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.model.AspectRatio
-import com.example.model.TorchMode
+import com.example.camera.CameraManager
+import com.example.model.*
 import com.example.ui.components.*
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.StudioDark
@@ -56,6 +62,50 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val sidebarWidth = if (isLandscape) 240.dp else 260.dp
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Camera permission handling
+    var cameraPermissionGranted by remember { mutableStateOf(false) }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        cameraPermissionGranted = isGranted
+        if (isGranted) {
+            // Initialize CameraManager once permission is granted
+            CameraManager.initialize(context, lifecycleOwner)
+        }
+    }
+
+    // Check/request camera permission on composition
+    LaunchedEffect(Unit) {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        cameraPermissionGranted = hasPermission
+        if (hasPermission) {
+            CameraManager.initialize(context, lifecycleOwner)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // Bind cameras when camera layers are added/changed
+    LaunchedEffect(uiState.project.layers) {
+        val cameraLayers = uiState.project.layers.filter { it.type == LayerType.CAMERA }
+        for (layer in cameraLayers) {
+            val facing = layer.cameraFacing ?: continue
+            if (!CameraManager.isCameraActive(layer.id)) {
+                if (cameraPermissionGranted) {
+                    // Camera will be bound when PreviewView is created in StageView
+                    // We just need to ensure the provider is available
+                    CameraManager.ensureProvider(context)
+                }
+            }
+        }
+        // Cleanup cameras for removed layers
+        val validLayerIds = uiState.project.layers.map { it.id }.toSet()
+        CameraManager.cleanupMissingLayers(validLayerIds)
+    }
 
     // Toast notifications
     LaunchedEffect(uiState.toastMessage) {

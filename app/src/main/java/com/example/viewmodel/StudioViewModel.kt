@@ -343,6 +343,11 @@ class StudioViewModel : ViewModel() {
 
     fun removeSelectedLayer() {
         val selectedId = _uiState.value.selectedLayerId ?: return
+        val layer = _uiState.value.project.layers.find { it.id == selectedId }
+        // Release camera resources if this is a camera layer
+        if (layer?.type == LayerType.CAMERA) {
+            com.example.camera.CameraManager.unbindCamera(selectedId)
+        }
         pushUndoState()
         _uiState.update { current ->
             val updated = current.project.layers.filterNot { it.id == selectedId }
@@ -384,7 +389,8 @@ class StudioViewModel : ViewModel() {
                 type = LayerType.CAMERA,
                 transform = LayerTransform(cx = 0.78f, cy = 0.28f, w = 0.35f, h = 0.38f),
                 accentColor = 0xFFF59E0B,
-                sampleTag = "Live Cam"
+                sampleTag = "Live Cam",
+                cameraFacing = CameraFacing.FRONT
             )
             LayerType.VIDEO -> Layer(
                 name = "Video Clip #${_uiState.value.project.layers.size + 1}",
@@ -430,6 +436,97 @@ class StudioViewModel : ViewModel() {
                 toastMessage = "Added ${newLayer.name}"
             )
         }
+    }
+
+    /**
+     * Add a camera source for the specified facing direction.
+     * Each camera source is an independent layer with its own camera instance.
+     * Front and back cameras can exist simultaneously.
+     */
+    fun addCameraSource(facing: CameraFacing) {
+        pushUndoState()
+        val name = when (facing) {
+            CameraFacing.FRONT -> "Front Camera"
+            CameraFacing.BACK -> "Back Camera"
+        }
+        val accentColor = when (facing) {
+            CameraFacing.FRONT -> 0xFFF59E0B
+            CameraFacing.BACK -> 0xFFEF4444
+        }
+        // Position them differently so they don't overlap by default
+        val transform = when (facing) {
+            CameraFacing.FRONT -> LayerTransform(cx = 0.78f, cy = 0.28f, w = 0.35f, h = 0.38f)
+            CameraFacing.BACK -> LayerTransform(cx = 0.22f, cy = 0.28f, w = 0.35f, h = 0.38f)
+        }
+        val newLayer = Layer(
+            name = name,
+            type = LayerType.CAMERA,
+            transform = transform,
+            accentColor = accentColor,
+            sampleTag = when (facing) {
+                CameraFacing.FRONT -> "Front Cam"
+                CameraFacing.BACK -> "Back Cam"
+            },
+            cameraFacing = facing,
+            isTorchOn = false
+        )
+        _uiState.update { current ->
+            val updated = current.project.layers + newLayer
+            current.copy(
+                project = current.project.copy(layers = updated, isDirty = true),
+                selectedLayerId = newLayer.id,
+                toastMessage = "Added $name"
+            )
+        }
+    }
+
+    /**
+     * Toggle torch for a specific camera layer.
+     * Returns true if the torch state changed successfully.
+     */
+    fun toggleCameraTorch(layerId: String): Boolean {
+        val layer = _uiState.value.project.layers.find { it.id == layerId } ?: return false
+        if (layer.type != LayerType.CAMERA) return false
+
+        val success = com.example.camera.CameraManager.setTorch(layerId, !layer.isTorchOn)
+        if (success) {
+            _uiState.update { current ->
+                val updated = current.project.layers.map {
+                    if (it.id == layerId) it.copy(isTorchOn = !it.isTorchOn) else it
+                }
+                current.copy(
+                    project = current.project.copy(layers = updated, isDirty = true),
+                    toastMessage = "${layer.name} torch ${if (!layer.isTorchOn) "ON" else "OFF"}"
+                )
+            }
+        } else {
+            _uiState.update {
+                it.copy(toastMessage = "${layer.name}: Torch not supported on this device")
+            }
+        }
+        return success
+    }
+
+    /**
+     * Set torch state for a specific camera layer.
+     */
+    fun setCameraTorch(layerId: String, on: Boolean): Boolean {
+        val layer = _uiState.value.project.layers.find { it.id == layerId } ?: return false
+        if (layer.type != LayerType.CAMERA) return false
+        if (layer.isTorchOn == on) return true
+
+        val success = com.example.camera.CameraManager.setTorch(layerId, on)
+        if (success) {
+            _uiState.update { current ->
+                val updated = current.project.layers.map {
+                    if (it.id == layerId) it.copy(isTorchOn = on) else it
+                }
+                current.copy(
+                    project = current.project.copy(layers = updated, isDirty = true)
+                )
+            }
+        }
+        return success
     }
 
     // --- Transform & Fit Controls ---
@@ -729,8 +826,42 @@ class StudioViewModel : ViewModel() {
     // --- Light & Torch ---
 
     fun setTorchMode(mode: TorchMode) {
-        _uiState.update {
-            it.copy(
+        // Map global torch mode to per-layer torch states
+        val layers = _uiState.value.project.layers
+        val frontCameraLayer = layers.find { it.type == LayerType.CAMERA && it.cameraFacing == CameraFacing.FRONT }
+        val backCameraLayer = layers.find { it.type == LayerType.CAMERA && it.cameraFacing == CameraFacing.BACK }
+
+        val wantFront = mode == TorchMode.FRONT || mode == TorchMode.BOTH
+        val wantBack = mode == TorchMode.BACK || mode == TorchMode.BOTH
+
+        // Set torch on front camera layer
+        if (frontCameraLayer != null) {
+            if (wantFront && !frontCameraLayer.isTorchOn) {
+                com.example.camera.CameraManager.setTorch(frontCameraLayer.id, true)
+            } else if (!wantFront && frontCameraLayer.isTorchOn) {
+                com.example.camera.CameraManager.setTorch(frontCameraLayer.id, false)
+            }
+        }
+
+        // Set torch on back camera layer
+        if (backCameraLayer != null) {
+            if (wantBack && !backCameraLayer.isTorchOn) {
+                com.example.camera.CameraManager.setTorch(backCameraLayer.id, true)
+            } else if (!wantBack && backCameraLayer.isTorchOn) {
+                com.example.camera.CameraManager.setTorch(backCameraLayer.id, false)
+            }
+        }
+
+        _uiState.update { current ->
+            val updated = current.project.layers.map { layer ->
+                when {
+                    layer.id == frontCameraLayer?.id -> layer.copy(isTorchOn = wantFront)
+                    layer.id == backCameraLayer?.id -> layer.copy(isTorchOn = wantBack)
+                    else -> layer
+                }
+            }
+            current.copy(
+                project = current.project.copy(layers = updated, isDirty = true),
                 torchMode = mode,
                 toastMessage = "Lighting: ${mode.label}"
             )

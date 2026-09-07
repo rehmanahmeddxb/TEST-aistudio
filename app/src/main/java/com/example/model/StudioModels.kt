@@ -10,6 +10,11 @@ enum class LayerType {
     TEXT
 }
 
+enum class CameraFacing {
+    FRONT,
+    BACK
+}
+
 enum class FitMode {
     FIT,   // Letterbox / contain
     FILL   // Cover / crop
@@ -56,7 +61,9 @@ data class Layer(
     val accentColor: Long = 0xFF38BDF8,
     val durationMs: Long = 180000L,
     val sampleTag: String = "",
-    val mediaUri: String? = null
+    val mediaUri: String? = null,
+    val cameraFacing: CameraFacing? = null,
+    val isTorchOn: Boolean = false
 )
 
 enum class AspectRatio(val label: String, val ratio: Float, val w: Int, val h: Int) {
