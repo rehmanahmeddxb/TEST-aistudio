@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -34,7 +34,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.3.1'
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
@@ -52,7 +52,15 @@ jobs:
           fi
           chmod +x gradlew
 
+      # Compile everything first so a compile error is reported as a compile error,
+      # not buried inside a "tests failed" step.
+      - name: Compile Sources & Tests
+        run: ./gradlew compileDebugSources compileDebugUnitTestSources --stacktrace
+
       - name: Run Unit Tests & Roborazzi Screenshot Tests
+        id: unit_tests
+        # Keep going so the APK/AAB are still produced and uploaded even when a test fails.
+        continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Build Release APK (Minified)
@@ -63,7 +71,7 @@ jobs:
 
       - name: Upload Unit Test Results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unit-test-results
           path: |
@@ -74,7 +82,7 @@ jobs:
 
       - name: Upload Roborazzi Screenshot Test Reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: roborazzi-reports
           path: |
@@ -84,8 +92,8 @@ jobs:
           retention-days: 14
 
       - name: Upload Release APK (Minified)
-        if: success()
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: reaction-studio-release-apk
           path: app/build/outputs/apk/release/*.apk
@@ -93,13 +101,42 @@ jobs:
           retention-days: 30
 
       - name: Upload Release AAB
-        if: success()
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: reaction-studio-release-aab
           path: app/build/outputs/bundle/release/*.aab
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Publish Test Summary
+        if: always()
+        run: |
+          echo "## Unit test summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.unit_tests.outcome }}" = "success" ]; then
+            echo "✅ All unit / screenshot tests passed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Unit / screenshot tests FAILED — see the \`unit-test-results\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Failed test cases" >> "$GITHUB_STEP_SUMMARY"
+          found=0
+          for f in $(grep -rl "<failure" app/build/test-results 2>/dev/null); do
+            found=1
+            echo "- \`$(basename "$f" .xml)\`" >> "$GITHUB_STEP_SUMMARY"
+            grep -o '<failure message="[^"]*"' "$f" | head -5 | sed 's/<failure message="/    - /; s/"$//' >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$found" = "0" ]; then
+            echo "_none_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Fail the job at the very end so the failure is still visible, but only after
+      # every artifact (reports, APK, AAB) has been uploaded.
+      - name: Fail if Unit Tests Failed
+        if: steps.unit_tests.outcome == 'failure'
+        run: |
+          echo "::error::Unit tests failed. Download the 'unit-test-results' artifact for details."
+          exit 1
 
   build-release:
     name: Build Release (Optional)
@@ -110,7 +147,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -119,7 +156,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.3.1'
 
@@ -149,7 +186,7 @@ jobs:
           ./gradlew assembleRelease bundleRelease --stacktrace || ./gradlew assembleRelease --stacktrace
 
       - name: Upload Release Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: reaction-studio-release
           path: |

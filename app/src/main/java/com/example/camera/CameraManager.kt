@@ -3,8 +3,6 @@ package com.example.camera
 import android.content.Context
 import android.util.Log
 import androidx.camera.core.Camera
-import androidx.camera.core.CameraControl
-import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -77,8 +75,8 @@ object CameraManager {
      */
     suspend fun ensureProvider(context: Context): Boolean {
         if (cameraProvider != null) return true
-        val executor = mainExecutor ?: return false
-        val lo = lifecycleOwner ?: return false
+        // The manager must have been initialised (executor + lifecycle owner) first.
+        if (mainExecutor == null || lifecycleOwner == null) return false
         return try {
             val provider = ProcessCameraProvider.getInstance(context).get()
             cameraProvider = provider
@@ -135,7 +133,9 @@ object CameraManager {
             // Clean up the preview
             try {
                 provider.unbind(preview)
-            } catch (_: Exception) {}
+            } catch (cleanupError: Exception) {
+                Log.w(TAG, "Error cleaning up preview for layer $layerId", cleanupError)
+            }
             false
         }
     }
@@ -166,18 +166,13 @@ object CameraManager {
         val cameraControl = camera.cameraControl
         val cameraInfo = camera.cameraInfo
 
-        // Check if torch is available on this camera
+        // Check if torch is available on this camera.
+        // CameraInfo.hasFlashUnit() is a plain Boolean in CameraX 1.5 (not a future).
         val torchAvailable = try {
-            // torchState LiveData is non-null when torch hardware is available
-            cameraInfo.torchState.value != null
+            cameraInfo.hasFlashUnit()
         } catch (e: Exception) {
-            // If we can't read torch state, try to check flash unit availability
-            try {
-                // hasFlashUnit returns ListenableFuture<Boolean> - check synchronously
-                cameraInfo.hasFlashUnit().get()
-            } catch (ex: Exception) {
-                false
-            }
+            Log.w(TAG, "Unable to query flash unit for layer $layerId", e)
+            false
         }
 
         if (!torchAvailable) {
