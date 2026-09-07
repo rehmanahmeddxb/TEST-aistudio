@@ -56,93 +56,32 @@ class StudioViewModel : ViewModel() {
     private var recordJob: Job? = null
 
     init {
-        initializeDemoProject()
+        initializeEmptyProject()
     }
 
-    private fun initializeDemoProject() {
-        val initialLayers = listOf(
-            Layer(
-                id = "bg_gameplay",
-                name = "Cyberpunk Boss Battle.mp4",
-                type = LayerType.VIDEO,
-                isVisible = true,
-                isLocked = true,
-                isBackground = true,
-                volume = 0.85f,
-                opacity = 1.0f,
-                fitMode = FitMode.FILL,
-                transform = LayerTransform(cx = 0.5f, cy = 0.5f, w = 1.0f, h = 1.0f),
-                accentColor = 0xFF38BDF8,
-                durationMs = 204000L,
-                sampleTag = "Game Clip"
-            ),
-            Layer(
-                id = "pip_camera",
-                name = "Ahmed Live Cam (Front)",
-                type = LayerType.CAMERA,
-                isVisible = true,
-                isLocked = false,
-                isBackground = false,
-                volume = 1.0f,
-                opacity = 1.0f,
-                fitMode = FitMode.FIT,
-                transform = LayerTransform(cx = 0.81f, cy = 0.28f, w = 0.34f, h = 0.40f),
-                accentColor = 0xFFF59E0B,
-                sampleTag = "Face Cam"
-            ),
-            Layer(
-                id = "txt_title",
-                name = "Title: UNBELIEVABLE TWIST!",
-                type = LayerType.TEXT,
-                isVisible = true,
-                isLocked = false,
-                isBackground = false,
-                opacity = 1.0f,
-                transform = LayerTransform(cx = 0.50f, cy = 0.12f, w = 0.72f, h = 0.14f),
-                textData = TextData(
-                    text = "😱 NO WAY THAT JUST HAPPENED!!",
-                    colorHex = 0xFFFFD600,
-                    fontSizeSp = 24f,
-                    hasShadow = true,
-                    isBold = true
-                ),
-                accentColor = 0xFFEF4444,
-                sampleTag = "Caption"
-            ),
-            Layer(
-                id = "logo_badge",
-                name = "Reaction Badge.png",
-                type = LayerType.IMAGE,
-                isVisible = true,
-                isLocked = false,
-                isBackground = false,
-                opacity = 0.90f,
-                transform = LayerTransform(cx = 0.12f, cy = 0.88f, w = 0.18f, h = 0.15f),
-                accentColor = 0xFF10B981,
-                sampleTag = "Overlay"
-            )
-        )
-
-        val project = Project(
-            name = "Epic Boss Fight Reaction",
-            durationMs = 204000L,
-            aspectRatio = AspectRatio.SIXTEEN_NINE,
-            background = CanvasBackground.DARK,
-            layers = initialLayers,
-            isDirty = false
-        )
-
+    /**
+     * A new project starts with zero layers — no demo video, camera, text, or image sources.
+     * The empty canvas is communicated visually by StageView's empty state (not a layer).
+     */
+    private fun initializeEmptyProject() {
         _uiState.update {
             it.copy(
-                project = project,
-                selectedLayerId = "pip_camera",
+                project = Project(
+                    name = "Untitled Project",
+                    durationMs = 204000L,
+                    aspectRatio = AspectRatio.SIXTEEN_NINE,
+                    background = CanvasBackground.DARK,
+                    layers = emptyList(),
+                    isDirty = false
+                ),
+                selectedLayerId = null,
                 stats = StatsInfo(
                     fps = 60,
-                    frameTimeMs = 16.2f,
-                    activeLayers = initialLayers.size,
+                    frameTimeMs = 16.6f,
+                    activeLayers = 0,
                     decoderType = "HW MediaCodec (H.264/OES)",
                     canvasResolution = "1920x1080",
-                    latencyMs = 11
+                    latencyMs = 9
                 )
             )
         }
@@ -682,9 +621,13 @@ class StudioViewModel : ViewModel() {
     }
 
     fun updateTransform(id: String, transform: LayerTransform) {
+        val layer = _uiState.value.project.layers.find { it.id == id } ?: return
+        if (layer.isLocked) return
+        // Called once per completed gesture: capture undo state before applying.
+        pushUndoState()
         _uiState.update { current ->
             val updated = current.project.layers.map {
-                if (it.id == id && !it.isLocked) it.copy(transform = transform) else it
+                if (it.id == id) it.copy(transform = transform) else it
             }
             current.copy(project = current.project.copy(layers = updated, isDirty = true))
         }

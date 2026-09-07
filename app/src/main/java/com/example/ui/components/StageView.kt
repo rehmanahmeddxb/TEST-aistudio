@@ -44,7 +44,140 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.model.*
 import com.example.ui.theme.*
+import kotlin.math.abs
 import kotlin.math.sin
+
+private enum class GestureMode { MOVE, RESIZE_CORNER, RESIZE_EDGE_H, RESIZE_EDGE_V, ROTATE }
+
+/**
+ * Holds the in-progress ("live") transform while the user drags / resizes / rotates a layer.
+ * Frame-by-frame pointer deltas mutate this local state only, so the canvas updates smoothly
+ * without repeatedly round-tripping through the ViewModel. The final transform is committed to
+ * the ViewModel once at gesture end via [commit].
+ */
+private class CanvasGestureState {
+    var activeLayerId by mutableStateOf<String?>(null)
+    var liveTransform by mutableStateOf<LayerTransform?>(null)
+    var mode by mutableStateOf(GestureMode.MOVE)
+    var corner by mutableStateOf(CornerPosition.BOTTOM_RIGHT)
+    var anchorX by mutableFloatStateOf(0f)
+    var anchorY by mutableFloatStateOf(0f)
+    var cornerX by mutableFloatStateOf(0f)
+    var cornerY by mutableFloatStateOf(0f)
+
+    fun beginMove(layer: Layer) {
+        if (layer.isLocked) return
+        activeLayerId = layer.id
+        liveTransform = layer.transform
+        mode = GestureMode.MOVE
+    }
+
+    fun beginResizeCorner(layer: Layer, corner: CornerPosition) {
+        if (layer.isLocked) return
+        val t = layer.transform
+        activeLayerId = layer.id
+        mode = GestureMode.RESIZE_CORNER
+        this.corner = corner
+        val sx = if (corner == CornerPosition.TOP_LEFT || corner == CornerPosition.BOTTOM_LEFT) -1f else 1f
+        val sy = if (corner == CornerPosition.TOP_LEFT || corner == CornerPosition.TOP_RIGHT) -1f else 1f
+        cornerX = t.cx + sx * t.w / 2f
+        cornerY = t.cy + sy * t.h / 2f
+        anchorX = t.cx - sx * t.w / 2f
+        anchorY = t.cy - sy * t.h / 2f
+        liveTransform = t
+    }
+
+    fun beginResizeEdgeH(layer: Layer) {
+        if (layer.isLocked) return
+        activeLayerId = layer.id
+        liveTransform = layer.transform
+        mode = GestureMode.RESIZE_EDGE_H
+    }
+
+    fun beginResizeEdgeV(layer: Layer) {
+        if (layer.isLocked) return
+        activeLayerId = layer.id
+        liveTransform = layer.transform
+        mode = GestureMode.RESIZE_EDGE_V
+    }
+
+    fun beginRotate(layer: Layer) {
+        if (layer.isLocked) return
+        activeLayerId = layer.id
+        liveTransform = layer.transform
+        mode = GestureMode.ROTATE
+    }
+
+    fun dragMove(dx: Float, dy: Float) {
+        val t = liveTransform ?: return
+        liveTransform = t.copy(
+            cx = (t.cx + dx).coerceIn(0f, 1f),
+            cy = (t.cy + dy).coerceIn(0f, 1f)
+        )
+    }
+
+    fun dragResizeCorner(dx: Float, dy: Float) {
+        val t = liveTransform ?: return
+        val sx = if (corner == CornerPosition.TOP_LEFT || corner == CornerPosition.BOTTOM_LEFT) -1f else 1f
+        val sy = if (corner == CornerPosition.TOP_LEFT || corner == CornerPosition.TOP_RIGHT) -1f else 1f
+        var newX = cornerX + dx
+        var newY = cornerY + dy
+        // Keep the dragged corner on the correct side of the anchored corner (no flip) with a min size.
+        newX = if (sx > 0f) newX.coerceAtLeast(anchorX + MIN_LAYER_SIZE) else newX.coerceAtMost(anchorX - MIN_LAYER_SIZE)
+        newY = if (sy > 0f) newY.coerceAtLeast(anchorY + MIN_LAYER_SIZE) else newY.coerceAtMost(anchorY - MIN_LAYER_SIZE)
+        // Keep the layer within the canvas bounds.
+        newX = newX.coerceIn(0f, 1f)
+        newY = newY.coerceIn(0f, 1f)
+        cornerX = newX
+        cornerY = newY
+        // Anchor the opposite corner and derive center/size from the dragged corner.
+        liveTransform = t.copy(
+            w = abs(newX - anchorX),
+            h = abs(newY - anchorY),
+            cx = (newX + anchorX) / 2f,
+            cy = (newY + anchorY) / 2f
+        )
+    }
+
+    fun dragResizeEdgeH(deltaW: Float) {
+        val t = liveTransform ?: return
+        val newW = (t.w + deltaW).coerceIn(MIN_LAYER_SIZE, 2.0f)
+        val diff = newW - t.w
+        liveTransform = t.copy(w = newW, cx = (t.cx + diff / 2f).coerceIn(0f, 1f))
+    }
+
+    fun dragResizeEdgeV(deltaH: Float) {
+        val t = liveTransform ?: return
+        val newH = (t.h + deltaH).coerceIn(MIN_LAYER_SIZE, 2.0f)
+        val diff = newH - t.h
+        liveTransform = t.copy(h = newH, cy = (t.cy + diff / 2f).coerceIn(0f, 1f))
+    }
+
+    fun dragRotate(delta: Float) {
+        val t = liveTransform ?: return
+        var rot = (t.rotationDeg + delta) % 360f
+        if (rot < 0f) rot += 360f
+        liveTransform = t.copy(rotationDeg = rot)
+    }
+
+    fun commit(onUpdateTransform: (String, LayerTransform) -> Unit) {
+        val id = activeLayerId
+        val t = liveTransform
+        if (id != null && t != null) {
+            onUpdateTransform(id, t)
+        }
+        reset()
+    }
+
+    fun cancel() = reset()
+
+    private fun reset() {
+        activeLayerId = null
+        liveTransform = null
+    }
+}
+
+private const val MIN_LAYER_SIZE = 0.08f
 
 @Composable
 fun StageView(
@@ -68,6 +201,9 @@ fun StageView(
     onStretchHeightSelected: () -> Unit = {},
     onResetRotationSelected: () -> Unit = {},
     onDeleteSelected: () -> Unit = {},
+    onToggleLayerVisibility: (String) -> Unit = {},
+    onToggleLayerPlaying: (String) -> Unit = {},
+    onPlayPause: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Live frame ticker animation for simulated video playback motion
@@ -82,7 +218,19 @@ fun StageView(
         label = "wave"
     )
 
-    val selectedLayer = project.layers.find { it.id == selectedLayerId }
+    // Live gesture state: frame-by-frame drag/resize/rotate updates mutate this local state so the
+    // canvas stays smooth; the final transform is committed to the ViewModel on gesture end.
+    val gestureState = remember { CanvasGestureState() }
+
+    // Layers rendered with the in-progress ("live") transform during a gesture.
+    val displayLayers = project.layers.map { layer ->
+        if (gestureState.activeLayerId == layer.id && gestureState.liveTransform != null) {
+            layer.copy(transform = gestureState.liveTransform!!)
+        } else {
+            layer
+        }
+    }
+    val selectedLayer = displayLayers.find { it.id == selectedLayerId }
 
     BoxWithConstraints(
         modifier = modifier
@@ -131,7 +279,14 @@ fun StageView(
                 .testTag("stage_canvas")
         ) {
             // Render all visible layers from bottom to top
-            project.layers.filter { it.isVisible }.forEach { layer ->
+            val visibleLayers = displayLayers.filter { it.isVisible }
+
+            // Empty canvas state (a visual hint only — never a layer)
+            if (visibleLayers.isEmpty()) {
+                EmptyCanvasState()
+            }
+
+            visibleLayers.forEach { layer ->
                 LayerItemRenderer(
                     layer = layer,
                     isSelected = layer.id == selectedLayerId,
@@ -141,15 +296,14 @@ fun StageView(
                     canvasHeightDp = canvasHeightDp,
                     canvasWidthPx = canvasWidthPx,
                     canvasHeightPx = canvasHeightPx,
+                    gestureState = gestureState,
                     onSelect = { onSelectLayer(layer.id) },
                     onDoubleTap = {
                         if (layer.type == LayerType.TEXT) {
                             onDoubleTapText(layer.id)
                         }
                     },
-                    onUpdateTransform = { newTransform ->
-                        onUpdateTransform(layer.id, newTransform)
-                    }
+                    onUpdateTransform = onUpdateTransform
                 )
             }
 
@@ -189,7 +343,10 @@ fun StageView(
                     canvasHeightDp = canvasHeightDp,
                     canvasWidthPx = canvasWidthPx,
                     canvasHeightPx = canvasHeightPx,
-                    onUpdateTransform = { onUpdateTransform(selectedLayer.id, it) }
+                    gestureState = gestureState,
+                    onUpdateTransform = onUpdateTransform,
+                    onToggleVisibility = { onToggleLayerVisibility(selectedLayer.id) },
+                    onTogglePlayPause = { onToggleLayerPlaying(selectedLayer.id) }
                 )
             }
         }
@@ -397,7 +554,7 @@ fun StageView(
                     tint = if (isPlaying) StudioCyan else Color.White,
                     modifier = Modifier
                         .size(20.dp)
-                        .clickable { /* Controlled via floating or sidebar */ }
+                        .clickable { onPlayPause() }
                 )
 
                 Spacer(modifier = Modifier.width(10.dp))
@@ -485,6 +642,97 @@ fun StageView(
 }
 
 @Composable
+private fun EmptyCanvasState() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(
+            color = Color.White.copy(alpha = 0.06f),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+        ) {
+            Icon(
+                imageVector = Icons.Default.Movie,
+                contentDescription = null,
+                tint = StudioCyan.copy(alpha = 0.9f),
+                modifier = Modifier
+                    .padding(14.dp)
+                    .size(28.dp)
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = "Your canvas is ready",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Add a camera, video, image or text to begin.",
+            color = StudioTextSecondary,
+            fontSize = 12.sp
+        )
+    }
+}
+
+@Composable
+private fun SelectionQuickControls(
+    layer: Layer,
+    onToggleVisibility: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isPlayable = layer.type == LayerType.VIDEO ||
+        layer.type == LayerType.CAMERA ||
+        layer.type == LayerType.SCREEN
+
+    Surface(
+        color = Color(0xF0111520),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, StudioCyan.copy(alpha = 0.5f)),
+        shadowElevation = 4.dp,
+        modifier = modifier
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp)
+        ) {
+            IconButton(
+                onClick = onToggleVisibility,
+                modifier = Modifier
+                    .size(28.dp)
+                    .testTag("canvas_visibility_button")
+            ) {
+                Icon(
+                    imageVector = if (layer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                    contentDescription = if (layer.isVisible) "Hide source" else "Show source",
+                    tint = if (layer.isVisible) Color.White else StudioTextMuted,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            if (isPlayable) {
+                IconButton(
+                    onClick = onTogglePlayPause,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("canvas_play_pause_button")
+                ) {
+                    Icon(
+                        imageVector = if (layer.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (layer.isPlaying) "Pause source" else "Play source",
+                        tint = StudioCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun BoxScope.LayerItemRenderer(
     layer: Layer,
     isSelected: Boolean,
@@ -494,11 +742,13 @@ private fun BoxScope.LayerItemRenderer(
     canvasHeightDp: Dp,
     canvasWidthPx: Float,
     canvasHeightPx: Float,
+    gestureState: CanvasGestureState,
     onSelect: () -> Unit,
     onDoubleTap: () -> Unit,
-    onUpdateTransform: (LayerTransform) -> Unit
+    onUpdateTransform: (String, LayerTransform) -> Unit
 ) {
     val t = layer.transform
+    val currentLayer by rememberUpdatedState(layer)
     val layerWidth = canvasWidthDp * t.w
     val layerHeight = canvasHeightDp * t.h
     val layerLeft = canvasWidthDp * (t.cx - t.w / 2f)
@@ -521,15 +771,18 @@ private fun BoxScope.LayerItemRenderer(
             .pointerInput(layer.id, layer.isLocked) {
                 if (!layer.isLocked) {
                     detectDragGestures(
-                        onDragStart = { onSelect() },
+                        onDragStart = {
+                            onSelect()
+                            gestureState.beginMove(currentLayer)
+                        },
                         onDrag = { change, dragAmount ->
                             change.consume()
                             val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
                             val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
-                            val newCx = (t.cx + deltaX).coerceIn(0f, 1f)
-                            val newCy = (t.cy + deltaY).coerceIn(0f, 1f)
-                            onUpdateTransform(t.copy(cx = newCx, cy = newCy))
-                        }
+                            gestureState.dragMove(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
                     )
                 }
             }
@@ -959,9 +1212,13 @@ private fun BoxScope.SelectionChrome(
     canvasHeightDp: Dp,
     canvasWidthPx: Float,
     canvasHeightPx: Float,
-    onUpdateTransform: (LayerTransform) -> Unit
+    gestureState: CanvasGestureState,
+    onUpdateTransform: (String, LayerTransform) -> Unit,
+    onToggleVisibility: () -> Unit,
+    onTogglePlayPause: () -> Unit
 ) {
     val t = layer.transform
+    val currentLayer by rememberUpdatedState(layer)
     val layerWidth = canvasWidthDp * t.w
     val layerHeight = canvasHeightDp * t.h
     val layerLeft = canvasWidthDp * (t.cx - t.w / 2f)
@@ -997,17 +1254,17 @@ private fun BoxScope.SelectionChrome(
                 .align(Alignment.Center)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
-                        val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
-                        onUpdateTransform(
-                            t.copy(
-                                cx = (t.cx + deltaX).coerceIn(0f, 1f),
-                                cy = (t.cy + deltaY).coerceIn(0f, 1f)
-                            )
-                        )
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginMove(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragMove(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1036,18 +1293,17 @@ private fun BoxScope.SelectionChrome(
                 .offset(8.dp, 8.dp)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
-                        val deltaH = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val diffH = newH - t.h
-                        val newCx = (t.cx + diffW / 2f).coerceIn(0f, 1f)
-                        val newCy = (t.cy + diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, h = newH, cx = newCx, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeCorner(currentLayer, CornerPosition.BOTTOM_RIGHT) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeCorner(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1066,18 +1322,17 @@ private fun BoxScope.SelectionChrome(
                 .offset((-8).dp, (-8).dp)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) -dragAmount.x / canvasWidthPx else 0f
-                        val deltaH = if (canvasHeightPx > 0) -dragAmount.y / canvasHeightPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val diffH = newH - t.h
-                        val newCx = (t.cx - diffW / 2f).coerceIn(0f, 1f)
-                        val newCy = (t.cy - diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, h = newH, cx = newCx, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeCorner(currentLayer, CornerPosition.TOP_LEFT) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeCorner(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1096,18 +1351,17 @@ private fun BoxScope.SelectionChrome(
                 .offset(8.dp, (-8).dp)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
-                        val deltaH = if (canvasHeightPx > 0) -dragAmount.y / canvasHeightPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val diffH = newH - t.h
-                        val newCx = (t.cx + diffW / 2f).coerceIn(0f, 1f)
-                        val newCy = (t.cy - diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, h = newH, cx = newCx, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeCorner(currentLayer, CornerPosition.TOP_RIGHT) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeCorner(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1126,18 +1380,17 @@ private fun BoxScope.SelectionChrome(
                 .offset((-8).dp, 8.dp)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) -dragAmount.x / canvasWidthPx else 0f
-                        val deltaH = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val diffH = newH - t.h
-                        val newCx = (t.cx - diffW / 2f).coerceIn(0f, 1f)
-                        val newCy = (t.cy + diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, h = newH, cx = newCx, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeCorner(currentLayer, CornerPosition.BOTTOM_LEFT) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaX = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            val deltaY = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeCorner(deltaX, deltaY)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1158,14 +1411,16 @@ private fun BoxScope.SelectionChrome(
                 .offset(6.dp, 0.dp)
                 .size(36.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val newCx = (t.cx + diffW / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, cx = newCx))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeEdgeH(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaW = if (canvasWidthPx > 0) dragAmount.x / canvasWidthPx else 0f
+                            gestureState.dragResizeEdgeH(deltaW)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1185,14 +1440,16 @@ private fun BoxScope.SelectionChrome(
                 .offset((-6).dp, 0.dp)
                 .size(36.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaW = if (canvasWidthPx > 0) -dragAmount.x / canvasWidthPx else 0f
-                        val newW = (t.w + deltaW).coerceIn(0.08f, 2.0f)
-                        val diffW = newW - t.w
-                        val newCx = (t.cx - diffW / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(w = newW, cx = newCx))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeEdgeH(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaW = if (canvasWidthPx > 0) -dragAmount.x / canvasWidthPx else 0f
+                            gestureState.dragResizeEdgeH(deltaW)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1212,14 +1469,16 @@ private fun BoxScope.SelectionChrome(
                 .offset(0.dp, 6.dp)
                 .size(36.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaH = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffH = newH - t.h
-                        val newCy = (t.cy + diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(h = newH, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeEdgeV(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaH = if (canvasHeightPx > 0) dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeEdgeV(deltaH)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1239,14 +1498,16 @@ private fun BoxScope.SelectionChrome(
                 .offset(0.dp, (-6).dp)
                 .size(36.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaH = if (canvasHeightPx > 0) -dragAmount.y / canvasHeightPx else 0f
-                        val newH = (t.h + deltaH).coerceIn(0.08f, 2.0f)
-                        val diffH = newH - t.h
-                        val newCy = (t.cy - diffH / 2f).coerceIn(0f, 1f)
-                        onUpdateTransform(t.copy(h = newH, cy = newCy))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginResizeEdgeV(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val deltaH = if (canvasHeightPx > 0) -dragAmount.y / canvasHeightPx else 0f
+                            gestureState.dragResizeEdgeV(deltaH)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1266,13 +1527,15 @@ private fun BoxScope.SelectionChrome(
                 .offset(y = (-40).dp)
                 .size(44.dp)
                 .pointerInput(layer.id) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        val delta = dragAmount.x * 0.9f
-                        val newRot = (t.rotationDeg + delta) % 360f
-                        val normalizedRot = if (newRot < 0f) newRot + 360f else newRot
-                        onUpdateTransform(t.copy(rotationDeg = normalizedRot))
-                    }
+                    detectDragGestures(
+                        onDragStart = { gestureState.beginRotate(currentLayer) },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            gestureState.dragRotate(dragAmount.x * 0.9f)
+                        },
+                        onDragEnd = { gestureState.commit(onUpdateTransform) },
+                        onDragCancel = { gestureState.cancel() }
+                    )
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -1302,5 +1565,15 @@ private fun BoxScope.SelectionChrome(
                 )
             }
         }
+
+        // Contextual source quick controls: Show/Hide + Play/Pause (reuses existing ViewModel ops)
+        SelectionQuickControls(
+            layer = layer,
+            onToggleVisibility = onToggleVisibility,
+            onTogglePlayPause = onTogglePlayPause,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .offset(x = (-4).dp, y = (-38).dp)
+        )
     }
 }

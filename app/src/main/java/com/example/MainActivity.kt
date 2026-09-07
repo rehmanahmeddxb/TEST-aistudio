@@ -36,14 +36,21 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                StudioScreen()
+                var showSplash by remember { mutableStateOf(true) }
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // The studio initializes underneath immediately — the splash never delays startup.
+                    StudioScreen(splashVisible = showSplash)
+                    if (showSplash) {
+                        AmsSplashScreen(onFinished = { showSplash = false })
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
+fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolean = false) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -194,7 +201,10 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
                             onStretchWidthSelected = { viewModel.stretchSelectedWidth() },
                             onStretchHeightSelected = { viewModel.stretchSelectedHeight() },
                             onResetRotationSelected = { uiState.selectedLayerId?.let { viewModel.resetLayerRotation(it) } },
-                            onDeleteSelected = { viewModel.removeSelectedLayer() }
+                            onDeleteSelected = { viewModel.removeSelectedLayer() },
+                            onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
+                            onToggleLayerPlaying = { viewModel.toggleLayerPlaying(it) },
+                            onPlayPause = { viewModel.togglePlayPause() }
                         )
 
                         // Floating Transport Controls (Bottom-Right on canvas)
@@ -315,7 +325,8 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
             )
         }
 
-        if (uiState.showStartupAspectRatioDialog) {
+        // Defer the startup dialog until the splash has finished so it doesn't appear above it.
+        if (uiState.showStartupAspectRatioDialog && !splashVisible) {
             StartupAspectRatioDialog(
                 currentAspectRatio = uiState.project.aspectRatio,
                 onSelectAspectRatio = { ratio ->
