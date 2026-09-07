@@ -134,7 +134,7 @@ jobs:
           chmod +x gradlew
 
       - name: Decode Keystore (if secret provided)
-        if: env.ENCODED_KEYSTORE != ''
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           ENCODED_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
