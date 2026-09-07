@@ -1,0 +1,7 @@
+{
+  "name": "Reaction Studio",
+  "description": "Professional reaction video recording and editing studio with collapsible sidebar hierarchy, multi-layer canvas, live camera, and audio mixer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
