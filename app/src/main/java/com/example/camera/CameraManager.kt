@@ -171,10 +171,10 @@ object CameraManager {
             // torchState LiveData is non-null when torch hardware is available
             cameraInfo.torchState.value != null
         } catch (e: Exception) {
-            // If we can't read torch state, try to check flash unit availability
+            // If we can't read torch state, fall back to flash unit availability.
+            // CameraInfo.hasFlashUnit() returns a plain Boolean, not a ListenableFuture.
             try {
-                // hasFlashUnit returns ListenableFuture<Boolean> - check synchronously
-                cameraInfo.hasFlashUnit().get()
+                cameraInfo.hasFlashUnit()
             } catch (ex: Exception) {
                 false
             }
