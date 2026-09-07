@@ -876,9 +876,10 @@ fun SidebarView(
                     }
                 }
 
-                // Full Canvas Mode
+                // Hide Menu Overlay (canvas is always full screen; this hides
+                // the floating Top Strip + Sidebar chrome on top of it)
                 SidebarActionItem(
-                    label = if (isFullCanvasMode) "Exit Full Canvas" else "Full Canvas Mode",
+                    label = "Hide Menu (Full Canvas)",
                     icon = Icons.Default.Fullscreen,
                     active = isFullCanvasMode,
                     onClick = { viewModel.toggleFullCanvasMode() }

@@ -244,7 +244,8 @@ fun TopStrip(
 
         Spacer(modifier = Modifier.width(2.dp))
 
-        // Full Screen Canvas toggle button
+        // Hide Menu / Go Full Screen button (canvas itself is always full screen;
+        // this hides the floating Top Strip + Sidebar chrome overlay).
         IconButton(
             onClick = onToggleFullCanvas,
             modifier = Modifier
@@ -252,9 +253,9 @@ fun TopStrip(
                 .size(36.dp)
         ) {
             Icon(
-                imageVector = if (isFullCanvasMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                contentDescription = if (isFullCanvasMode) "Exit Full Screen Canvas" else "Full Screen Canvas",
-                tint = if (isFullCanvasMode) StudioCyan else StudioTextPrimary,
+                imageVector = Icons.Default.Fullscreen,
+                contentDescription = "Hide Menu (Full Canvas)",
+                tint = StudioTextPrimary,
                 modifier = Modifier.size(20.dp)
             )
         }
@@ -283,13 +284,13 @@ fun TopStrip(
                 DropdownMenuItem(
                     text = {
                         Text(
-                            text = if (isFullCanvasMode) "Exit Full Screen Canvas" else "Full Screen Canvas",
+                            text = "Hide Menu (Full Canvas)",
                             color = StudioTextPrimary
                         )
                     },
                     leadingIcon = {
                         Icon(
-                            imageVector = if (isFullCanvasMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            imageVector = Icons.Default.Fullscreen,
                             contentDescription = null,
                             tint = StudioCyan
                         )

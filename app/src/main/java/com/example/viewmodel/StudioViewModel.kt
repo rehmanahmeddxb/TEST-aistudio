@@ -18,8 +18,8 @@ data class StudioUiState(
     val currentPositionMs: Long = 14000L, // 00:14 default preview
     val isRecording: Boolean = false,
     val recordDurationMs: Long = 0L,
-    val isSidebarOpen: Boolean = true,
-    val isFullCanvasMode: Boolean = false,
+    val isSidebarOpen: Boolean = false,
+    val isFullCanvasMode: Boolean = true,
     val showStatsOverlay: Boolean = false,
     val audioSettings: AudioSettings = AudioSettings(),
     val torchMode: TorchMode = TorchMode.OFF,
@@ -220,14 +220,14 @@ class StudioViewModel : ViewModel() {
         }
     }
 
+    /**
+     * The canvas is always full screen now. This toggles the floating
+     * Top Strip + Sidebar chrome overlay on top of it (kept for the existing
+     * "Full Canvas" affordances scattered across the UI, which now simply
+     * hide/show that overlay instead of resizing the canvas).
+     */
     fun toggleFullCanvasMode() {
-        _uiState.update {
-            val willBeFull = !it.isFullCanvasMode
-            it.copy(
-                isFullCanvasMode = willBeFull,
-                isSidebarOpen = if (willBeFull) false else it.isSidebarOpen
-            )
-        }
+        _uiState.update { it.copy(isSidebarOpen = !it.isSidebarOpen) }
     }
 
     // --- Playback & Transport ---
@@ -371,6 +371,16 @@ class StudioViewModel : ViewModel() {
         _uiState.update { current ->
             val updated = current.project.layers.map {
                 if (it.id == id) it.copy(isPlaying = !it.isPlaying) else it
+            }
+            current.copy(project = current.project.copy(layers = updated))
+        }
+    }
+
+    /** Explicitly stops (pauses) a single source frame, e.g. from its quick-control overlay. */
+    fun stopLayerPlayback(id: String) {
+        _uiState.update { current ->
+            val updated = current.project.layers.map {
+                if (it.id == id) it.copy(isPlaying = false) else it
             }
             current.copy(project = current.project.copy(layers = updated))
         }

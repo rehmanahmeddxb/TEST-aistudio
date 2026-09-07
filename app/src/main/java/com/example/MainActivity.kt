@@ -12,11 +12,18 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -74,13 +81,10 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
         }
     }
 
-    // BackHandler: Exit full canvas mode or close sidebar if open before exiting
-    BackHandler(enabled = uiState.isFullCanvasMode || uiState.isSidebarOpen) {
-        if (uiState.isFullCanvasMode) {
-            viewModel.toggleFullCanvasMode()
-        } else if (uiState.isSidebarOpen) {
-            viewModel.setSidebarOpen(false)
-        }
+    // BackHandler: Close the floating menu/sidebar overlay (if open) before exiting.
+    // The canvas itself is always full screen, so there's no separate mode to exit.
+    BackHandler(enabled = uiState.isSidebarOpen) {
+        viewModel.setSidebarOpen(false)
     }
 
     Scaffold(
@@ -93,9 +97,104 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Top Strip (48dp height)
-                if (!uiState.isFullCanvasMode) {
+            // --- FULL-SCREEN CANVAS BASE LAYER ---
+            // The canvas always fills the entire available screen. The top strip
+            // and sidebar are floating overlays on top of it (never resize it),
+            // so the workspace is edge-to-edge at all times.
+            StageView(
+                project = uiState.project,
+                selectedLayerId = uiState.selectedLayerId,
+                isPlaying = uiState.isPlaying,
+                currentPositionMs = uiState.currentPositionMs,
+                isRecording = uiState.isRecording,
+                showStatsOverlay = uiState.showStatsOverlay,
+                stats = uiState.stats,
+                isFullCanvasMode = !uiState.isSidebarOpen,
+                onSelectLayer = { viewModel.selectLayer(it) },
+                onUpdateTransform = { id, transform ->
+                    viewModel.updateTransform(id, transform)
+                },
+                onDoubleTapText = {
+                    viewModel.showTextEditorDialog(true)
+                },
+                onSeek = { viewModel.seekTo(it) },
+                onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
+                onToggleLayerPlaying = { viewModel.toggleLayerPlaying(it) },
+                onStopLayer = { viewModel.stopLayerPlayback(it) },
+                onToggleFullCanvas = { viewModel.toggleFullCanvasMode() },
+                onAutoFillSelected = { viewModel.autoFillSelectedLayer() },
+                onFitFrameSelected = { viewModel.fitSelectedToFrame() },
+                onCenterSelected = { viewModel.centerSelectedLayer() },
+                onStretchWidthSelected = { viewModel.stretchSelectedWidth() },
+                onStretchHeightSelected = { viewModel.stretchSelectedHeight() },
+                onResetRotationSelected = { uiState.selectedLayerId?.let { viewModel.resetLayerRotation(it) } },
+                onDeleteSelected = { viewModel.removeSelectedLayer() },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // Floating Transport Controls (Bottom-Right, always on top of the canvas).
+            FloatingControls(
+                isPlaying = uiState.isPlaying,
+                isRecording = uiState.isRecording,
+                recordDurationMs = uiState.recordDurationMs,
+                isVisible = true,
+                onPlayPause = { viewModel.togglePlayPause() },
+                onStop = { viewModel.stop() },
+                onRecord = { viewModel.toggleRecording() },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 16.dp)
+            )
+
+            // --- FLOATING MENU BUTTON (Top-Left) ---
+            // Reveals the Top Strip + Sidebar overlay without ever resizing the canvas.
+            AnimatedVisibility(
+                visible = !uiState.isSidebarOpen,
+                enter = fadeIn(tween(150)),
+                exit = fadeOut(tween(120)),
+                modifier = Modifier.align(Alignment.TopStart)
+            ) {
+                FloatingMenuButton(
+                    onClick = { viewModel.setSidebarOpen(true) },
+                    modifier = Modifier.padding(10.dp)
+                )
+            }
+
+            // --- OVERLAY: TOP STRIP + SIDEBAR (floats above the canvas, doesn't resize it) ---
+            AnimatedVisibility(
+                visible = uiState.isSidebarOpen,
+                enter = fadeIn(tween(150)),
+                exit = fadeOut(tween(150)),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // Scrim to dismiss the overlay by tapping outside the sidebar
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { viewModel.setSidebarOpen(false) }
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .align(Alignment.TopStart)
+            ) {
+                AnimatedVisibility(
+                    visible = uiState.isSidebarOpen,
+                    enter = slideInVertically(
+                        initialOffsetY = { -it },
+                        animationSpec = tween(220)
+                    ) + fadeIn(tween(200)),
+                    exit = slideOutVertically(
+                        targetOffsetY = { -it },
+                        animationSpec = tween(180)
+                    ) + fadeOut(tween(150))
+                ) {
                     TopStrip(
                         projectName = uiState.project.name,
                         aspectRatio = uiState.project.aspectRatio,
@@ -104,7 +203,7 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
                         canUndo = uiState.canUndo,
                         canRedo = uiState.canRedo,
                         showStatsOverlay = uiState.showStatsOverlay,
-                        isFullCanvasMode = uiState.isFullCanvasMode,
+                        isFullCanvasMode = !uiState.isSidebarOpen,
                         onToggleSidebar = { viewModel.toggleSidebar() },
                         onRenameClick = { viewModel.showRenameDialog(true) },
                         onAspectCycleClick = {
@@ -126,91 +225,36 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
                     )
                 }
 
-                // Studio Workspace Row: [Sidebar] + [Canvas Stage with Floating Transport Controls]
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                AnimatedVisibility(
+                    visible = uiState.isSidebarOpen,
+                    enter = slideInHorizontally(
+                        initialOffsetX = { -it },
+                        animationSpec = tween(220)
+                    ) + fadeIn(tween(200)),
+                    exit = slideOutHorizontally(
+                        targetOffsetX = { -it },
+                        animationSpec = tween(180)
+                    ) + fadeOut(tween(150))
                 ) {
-                    // Collapsible Hierarchical Sidebar
-                    AnimatedVisibility(
-                        visible = uiState.isSidebarOpen && !uiState.isFullCanvasMode,
-                        enter = slideInHorizontally(
-                            initialOffsetX = { -it },
-                            animationSpec = tween(220)
-                        ) + fadeIn(tween(200)),
-                        exit = slideOutHorizontally(
-                            targetOffsetX = { -it },
-                            animationSpec = tween(180)
-                        ) + fadeOut(tween(150))
-                    ) {
-                        SidebarView(
-                            project = uiState.project,
-                            selectedLayerId = uiState.selectedLayerId,
-                            audioSettings = uiState.audioSettings,
-                            torchMode = uiState.torchMode,
-                            isPlaying = uiState.isPlaying,
-                            isRecording = uiState.isRecording,
-                            isFullCanvasMode = uiState.isFullCanvasMode,
-                            showStatsOverlay = uiState.showStatsOverlay,
-                            expandedSectionIds = uiState.expandedSectionIds,
-                            expandedItemIds = uiState.expandedItemIds,
-                            onToggleSection = { viewModel.toggleSectionExpanded(it) },
-                            onToggleItem = { viewModel.toggleItemExpanded(it) },
-                            viewModel = viewModel,
-                            modifier = Modifier
-                                .width(sidebarWidth)
-                                .fillMaxHeight()
-                        )
-                    }
-
-                    // Canvas Stage (Takes remaining width and real estate)
-                    Box(
+                    SidebarView(
+                        project = uiState.project,
+                        selectedLayerId = uiState.selectedLayerId,
+                        audioSettings = uiState.audioSettings,
+                        torchMode = uiState.torchMode,
+                        isPlaying = uiState.isPlaying,
+                        isRecording = uiState.isRecording,
+                        isFullCanvasMode = !uiState.isSidebarOpen,
+                        showStatsOverlay = uiState.showStatsOverlay,
+                        expandedSectionIds = uiState.expandedSectionIds,
+                        expandedItemIds = uiState.expandedItemIds,
+                        onToggleSection = { viewModel.toggleSectionExpanded(it) },
+                        onToggleItem = { viewModel.toggleItemExpanded(it) },
+                        viewModel = viewModel,
                         modifier = Modifier
-                            .weight(1f)
+                            .width(sidebarWidth)
                             .fillMaxHeight()
-                    ) {
-                        StageView(
-                            project = uiState.project,
-                            selectedLayerId = uiState.selectedLayerId,
-                            isPlaying = uiState.isPlaying,
-                            currentPositionMs = uiState.currentPositionMs,
-                            isRecording = uiState.isRecording,
-                            showStatsOverlay = uiState.showStatsOverlay,
-                            stats = uiState.stats,
-                            isFullCanvasMode = uiState.isFullCanvasMode,
-                            onSelectLayer = { viewModel.selectLayer(it) },
-                            onUpdateTransform = { id, transform ->
-                                viewModel.updateTransform(id, transform)
-                            },
-                            onDoubleTapText = {
-                                viewModel.showTextEditorDialog(true)
-                            },
-                            onSeek = { viewModel.seekTo(it) },
-                            onToggleFullCanvas = { viewModel.toggleFullCanvasMode() },
-                            onAutoFillSelected = { viewModel.autoFillSelectedLayer() },
-                            onFitFrameSelected = { viewModel.fitSelectedToFrame() },
-                            onCenterSelected = { viewModel.centerSelectedLayer() },
-                            onStretchWidthSelected = { viewModel.stretchSelectedWidth() },
-                            onStretchHeightSelected = { viewModel.stretchSelectedHeight() },
-                            onResetRotationSelected = { uiState.selectedLayerId?.let { viewModel.resetLayerRotation(it) } },
-                            onDeleteSelected = { viewModel.removeSelectedLayer() }
-                        )
-
-                        // Floating Transport Controls (Bottom-Right on canvas)
-                        FloatingControls(
-                            isPlaying = uiState.isPlaying,
-                            isRecording = uiState.isRecording,
-                            recordDurationMs = uiState.recordDurationMs,
-                            isVisible = !uiState.isFullCanvasMode,
-                            onPlayPause = { viewModel.togglePlayPause() },
-                            onStop = { viewModel.stop() },
-                            onRecord = { viewModel.toggleRecording() },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 16.dp, bottom = 64.dp)
-                        )
-                    }
+                            .shadow(12.dp)
+                    )
                 }
             }
 
@@ -331,4 +375,31 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel()) {
 @Composable
 fun Greeting(name: String, modifier: Modifier = Modifier) {
     Text(text = "Ahmed Reaction Studio ($name)", modifier = modifier)
+}
+
+/**
+ * Small floating hamburger button pinned to the top-left of the full-screen
+ * canvas. Reveals the Top Strip + Sidebar overlay without ever resizing or
+ * pushing the canvas, so the workspace stays edge-to-edge at all times.
+ */
+@Composable
+private fun FloatingMenuButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.75f),
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+    ) {
+        IconButton(onClick = onClick) {
+            Icon(
+                imageVector = Icons.Default.Menu,
+                contentDescription = "Open menu",
+                tint = Color.White
+            )
+        }
+    }
 }

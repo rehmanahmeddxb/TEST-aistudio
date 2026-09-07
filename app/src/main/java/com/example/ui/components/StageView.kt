@@ -60,6 +60,9 @@ fun StageView(
     onUpdateTransform: (String, LayerTransform) -> Unit,
     onDoubleTapText: (String) -> Unit,
     onSeek: (Long) -> Unit,
+    onToggleLayerVisibility: (String) -> Unit = {},
+    onToggleLayerPlaying: (String) -> Unit = {},
+    onStopLayer: (String) -> Unit = {},
     onToggleFullCanvas: () -> Unit = {},
     onAutoFillSelected: () -> Unit = {},
     onFitFrameSelected: () -> Unit = {},
@@ -98,10 +101,12 @@ fun StageView(
             },
         contentAlignment = Alignment.Center
     ) {
-        // Compute fitted canvas dimensions preserving project aspect ratio
+        // Compute fitted canvas dimensions preserving project aspect ratio.
+        // The stage is always rendered edge-to-edge full screen; the menu
+        // chrome (top strip / sidebar) floats on top instead of resizing it.
         val targetRatio = project.aspectRatio.ratio
-        val availW = if (isFullCanvasMode) maxWidth else (maxWidth - 8.dp).coerceAtLeast(100.dp)
-        val availH = if (isFullCanvasMode) maxHeight else (maxHeight - 48.dp).coerceAtLeast(100.dp)
+        val availW = maxWidth
+        val availH = maxHeight
 
         val (canvasWidthDp, canvasHeightDp) = remember(availW, availH, targetRatio) {
             val availRatio = availW.value / availH.value
@@ -130,8 +135,9 @@ fun StageView(
                 .background(Color(project.background.colorLong))
                 .testTag("stage_canvas")
         ) {
-            // Render all visible layers from bottom to top
-            project.layers.filter { it.isVisible }.forEach { layer ->
+            // Render every layer (even hidden ones, dimmed) so the fast quick-control
+            // overlay (eye / play / stop) is always reachable directly on its frame.
+            project.layers.forEach { layer ->
                 LayerItemRenderer(
                     layer = layer,
                     isSelected = layer.id == selectedLayerId,
@@ -149,7 +155,10 @@ fun StageView(
                     },
                     onUpdateTransform = { newTransform ->
                         onUpdateTransform(layer.id, newTransform)
-                    }
+                    },
+                    onToggleVisibility = { onToggleLayerVisibility(layer.id) },
+                    onTogglePlay = { onToggleLayerPlaying(layer.id) },
+                    onStopLayer = { onStopLayer(layer.id) }
                 )
             }
 
@@ -339,11 +348,13 @@ fun StageView(
             }
         }
 
-        // --- FLOATING FULL CANVAS TOGGLE BUTTON (Top-Right) ---
+        // --- FLOATING MENU CHROME TOGGLE BUTTON (Top-Right) ---
+        // The canvas is always full screen; this shows/hides the floating
+        // Top Strip + Sidebar overlay on top of it.
         Surface(
-            color = if (isFullCanvasMode) StudioCyan else Color.Black.copy(alpha = 0.75f),
+            color = if (isFullCanvasMode) Color.Black.copy(alpha = 0.75f) else StudioCyan,
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, if (isFullCanvasMode) Color.Transparent else Color.White.copy(alpha = 0.2f)),
+            border = BorderStroke(1.dp, if (isFullCanvasMode) Color.White.copy(alpha = 0.2f) else Color.Transparent),
             shadowElevation = 6.dp,
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -357,17 +368,17 @@ fun StageView(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = if (isFullCanvasMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                    contentDescription = if (isFullCanvasMode) "Exit Full Canvas" else "Full Canvas Mode",
-                    tint = if (isFullCanvasMode) Color.Black else Color.White,
+                    imageVector = if (isFullCanvasMode) Icons.Default.Fullscreen else Icons.Default.FullscreenExit,
+                    contentDescription = if (isFullCanvasMode) "Show Menu" else "Hide Menu",
+                    tint = if (isFullCanvasMode) Color.White else Color.Black,
                     modifier = Modifier.size(15.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (isFullCanvasMode) "Exit Full" else "Full Canvas",
+                    text = if (isFullCanvasMode) "Menu" else "Hide Menu",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (isFullCanvasMode) Color.Black else Color.White
+                    color = if (isFullCanvasMode) Color.White else Color.Black
                 )
             }
         }
@@ -496,13 +507,18 @@ private fun BoxScope.LayerItemRenderer(
     canvasHeightPx: Float,
     onSelect: () -> Unit,
     onDoubleTap: () -> Unit,
-    onUpdateTransform: (LayerTransform) -> Unit
+    onUpdateTransform: (LayerTransform) -> Unit,
+    onToggleVisibility: () -> Unit = {},
+    onTogglePlay: () -> Unit = {},
+    onStopLayer: () -> Unit = {}
 ) {
     val t = layer.transform
     val layerWidth = canvasWidthDp * t.w
     val layerHeight = canvasHeightDp * t.h
     val layerLeft = canvasWidthDp * (t.cx - t.w / 2f)
     val layerTop = canvasHeightDp * (t.cy - t.h / 2f)
+    // Media source frames (camera/video/screen) get the fast play/stop/eye handles.
+    val isMediaSource = layer.type == LayerType.CAMERA || layer.type == LayerType.VIDEO || layer.type == LayerType.SCREEN
 
     Box(
         modifier = Modifier
@@ -510,7 +526,7 @@ private fun BoxScope.LayerItemRenderer(
             .size(width = layerWidth, height = layerHeight)
             .graphicsLayer {
                 rotationZ = t.rotationDeg
-                alpha = layer.opacity
+                alpha = if (layer.isVisible) layer.opacity else layer.opacity * 0.35f
             }
             .pointerInput(layer.id, layer.isLocked) {
                 detectTapGestures(
@@ -535,13 +551,150 @@ private fun BoxScope.LayerItemRenderer(
             }
             .clip(if (layer.type == LayerType.CAMERA) RoundedCornerShape(10.dp) else RoundedCornerShape(0.dp))
     ) {
-        when (layer.type) {
-            LayerType.VIDEO -> VideoLayerVisual(layer, isPlaying, wavePhase)
-            LayerType.CAMERA -> CameraPiPLayerVisual(layer, isPlaying, wavePhase)
-            LayerType.IMAGE -> ImageOverlayVisual(layer)
-            LayerType.SCREEN -> ScreenRecordVisual(layer, isPlaying, wavePhase)
-            LayerType.TEXT -> TextOverlayVisual(layer)
+        if (layer.isVisible) {
+            when (layer.type) {
+                LayerType.VIDEO -> VideoLayerVisual(layer, isPlaying, wavePhase)
+                LayerType.CAMERA -> CameraPiPLayerVisual(layer, isPlaying, wavePhase)
+                LayerType.IMAGE -> ImageOverlayVisual(layer)
+                LayerType.SCREEN -> ScreenRecordVisual(layer, isPlaying, wavePhase)
+                LayerType.TEXT -> TextOverlayVisual(layer)
+            }
+        } else {
+            // Hidden placeholder so the frame stays reachable via its quick controls
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.VisibilityOff,
+                    contentDescription = null,
+                    tint = StudioTextMuted,
+                    modifier = Modifier.size((minOf(layerWidth, layerHeight).value * 0.22f).dp.coerceIn(14.dp, 28.dp))
+                )
+            }
         }
+
+        // --- FAST SOURCE HANDLES: Play/Pause, Stop, Show/Hide ---
+        // Always available directly on the frame so sources can be controlled
+        // instantly, without opening the sidebar.
+        if (isMediaSource) {
+            LayerQuickControls(
+                layer = layer,
+                isSelected = isSelected,
+                onToggleVisibility = onToggleVisibility,
+                onTogglePlay = onTogglePlay,
+                onStopLayer = onStopLayer,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+            )
+        } else {
+            // Non-media sources (image/text) still get a quick eye toggle.
+            LayerVisibilityHandle(
+                isVisible = layer.isVisible,
+                onToggleVisibility = onToggleVisibility,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Floating pill of quick-access handles rendered directly on top of a
+ * camera/video/screen source frame: Play/Pause, Stop and Show/Hide.
+ * Designed to be reachable & tappable instantly without opening the sidebar.
+ */
+@Composable
+private fun LayerQuickControls(
+    layer: Layer,
+    isSelected: Boolean,
+    onToggleVisibility: () -> Unit,
+    onTogglePlay: () -> Unit,
+    onStopLayer: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.62f),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, if (isSelected) StudioCyan.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.18f)),
+        modifier = modifier.testTag("layer_quick_controls_${layer.id}")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp)
+        ) {
+            QuickHandleButton(
+                icon = if (layer.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                tint = StudioCyan,
+                contentDescription = if (layer.isPlaying) "Pause ${layer.name}" else "Play ${layer.name}",
+                onClick = onTogglePlay,
+                testTag = "layer_play_toggle_${layer.id}"
+            )
+            QuickHandleButton(
+                icon = Icons.Default.Stop,
+                tint = StudioRecordRed,
+                contentDescription = "Stop ${layer.name}",
+                onClick = onStopLayer,
+                testTag = "layer_stop_button_${layer.id}"
+            )
+            QuickHandleButton(
+                icon = if (layer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                tint = if (layer.isVisible) StudioTextPrimary else StudioTextMuted,
+                contentDescription = if (layer.isVisible) "Hide ${layer.name}" else "Show ${layer.name}",
+                onClick = onToggleVisibility,
+                testTag = "layer_visibility_toggle_${layer.id}"
+            )
+        }
+    }
+}
+
+@Composable
+private fun LayerVisibilityHandle(
+    isVisible: Boolean,
+    onToggleVisibility: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.62f),
+        shape = CircleShape,
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)),
+        modifier = modifier
+    ) {
+        IconButton(onClick = onToggleVisibility, modifier = Modifier.size(26.dp)) {
+            Icon(
+                imageVector = if (isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                contentDescription = if (isVisible) "Hide layer" else "Show layer",
+                tint = if (isVisible) StudioTextPrimary else StudioTextMuted,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun QuickHandleButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    contentDescription: String,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .testTag(testTag)
+            .size(26.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(14.dp)
+        )
     }
 }
 
