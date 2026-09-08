@@ -487,15 +487,17 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
                     } else {
                         dec.releaseOutputBuffer(outIdx, true) // render to ImageReader
                         val rendered = tryAcquireYuvFrame()
-                        if (rendered != null) {
-                            val previous = bitmap
-                            val corrected = rotateIfNeeded(rendered)
-                            bitmap = corrected
-                            if (previous != null && previous !== rawBitmap && previous !== corrected) {
-                                previous.recycle()
-                            }
-                            lastDecodedUs = info.presentationTimeUs
+                            ?: throw Mp4RenderExporter.ExportException(
+                                "The video decoder produced no readable frame at " +
+                                    "${info.presentationTimeUs / 1000L} ms."
+                            )
+                        val previous = bitmap
+                        val corrected = rotateIfNeeded(rendered)
+                        bitmap = corrected
+                        if (previous != null && previous !== rawBitmap && previous !== corrected) {
+                            previous.recycle()
                         }
+                        lastDecodedUs = info.presentationTimeUs
                     }
                 }
                 else -> { /* no output available yet */ }
@@ -510,7 +512,10 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
 
     private fun tryAcquireYuvFrame(): Bitmap? {
         var image: android.media.Image? = null
-        for (attempt in 0 until 5) {
+        // releaseOutputBuffer(render=true) queues work to the Surface asynchronously. Ten
+        // milliseconds was not enough even on the Android emulator and caused a valid source to
+        // be silently rendered as the canvas background. Wait up to 500 ms, then fail explicitly.
+        for (attempt in 0 until 250) {
             image = imageReader?.acquireLatestImage()
             if (image != null) break
             try {

@@ -63,6 +63,7 @@ class Mp4RenderExporterInstrumentedTest {
                 output = sourceFile
             )
             assertPlayableVideo(sourceFile, expectedWidth = 1280, expectedHeight = 720)
+            assertCenterPixelIsOrange(sourceFile)
 
             // Pass 2: exercise real MediaExtractor/MediaCodec source decoding and composition.
             exportToFile(
