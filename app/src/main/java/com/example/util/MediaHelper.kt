@@ -22,15 +22,20 @@ object MediaHelper {
         return name
     }
 
-    fun getVideoDurationMs(context: Context, uri: Uri): Long {
+    /**
+     * Returns the actual duration of the video at [uri], or `null` when it cannot be read.
+     * This intentionally does NOT invent a fallback duration: callers must decide how to
+     * handle an unreadable duration explicitly rather than silently fabricating 3 minutes.
+     */
+    fun getVideoDurationMs(context: Context, uri: Uri): Long? {
+        val retriever = MediaMetadataRetriever()
         return try {
-            val retriever = MediaMetadataRetriever()
             retriever.setDataSource(context, uri)
-            val time = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-            retriever.release()
-            time?.toLongOrNull() ?: 180000L
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
         } catch (e: Exception) {
-            180000L
+            null
+        } finally {
+            runCatching { retriever.release() }
         }
     }
 }

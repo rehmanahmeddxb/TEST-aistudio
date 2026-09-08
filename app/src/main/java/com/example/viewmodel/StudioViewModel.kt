@@ -15,7 +15,8 @@ data class StudioUiState(
     val project: Project = Project(),
     val selectedLayerId: String? = null,
     val isPlaying: Boolean = false,
-    val currentPositionMs: Long = 14000L, // 00:14 default preview
+    // A fresh project always starts the playhead at 0 (never an arbitrary 00:14).
+    val currentPositionMs: Long = 0L,
     val isRecording: Boolean = false,
     val recordDurationMs: Long = 0L,
     val isSidebarOpen: Boolean = true,
@@ -34,6 +35,17 @@ data class StudioUiState(
     val exportProgress: Float = 0f,
     val isExporting: Boolean = false,
     val exportedSuccessPath: String? = null,
+    /**
+     * Incremented every time the user confirms an export. The UI observes this id and runs the
+     * real encode pipeline for that request (request-driven, not a fake timer loop).
+     */
+    val exportRequestId: Int = 0,
+    /** Destination chosen by the user (persisted SAF tree Uri), or null to use the default Movies. */
+    val exportFolderUri: String? = null,
+    /** Human-readable destination label shown in the UI (e.g. "Movies (default)"). */
+    val exportFolderName: String = "Movies (default)",
+    /** Non-null when the real export failed; drives the error state of the export dialog. */
+    val exportError: String? = null,
     val showAudioMixer: Boolean = false,
     val showExportDialog: Boolean = false,
     val showDiagnosticsDialog: Boolean = false,
@@ -67,21 +79,26 @@ class StudioViewModel : ViewModel() {
     }
 
     /**
-     * A new project starts with zero layers — no demo video, camera, text, or image sources.
-     * The empty canvas is communicated visually by StageView's empty state (not a layer).
+     * A new project starts with zero layers — no demo video, camera, text, or image sources —
+     * with a zero duration and a zero playhead. There is no fake 3:24 timeline and no arbitrary
+     * 14-second starting position. The empty canvas is communicated visually by StageView's
+     * empty state (not a layer). Once real media is added the timeline/duration reappears.
      */
     private fun initializeEmptyProject() {
+        playbackJob?.cancel()
         _uiState.update {
             it.copy(
                 project = Project(
                     name = "Untitled Project",
-                    durationMs = 204000L,
+                    durationMs = 0L,
                     aspectRatio = AspectRatio.SIXTEEN_NINE,
                     background = CanvasBackground.DARK,
                     layers = emptyList(),
                     isDirty = false
                 ),
                 selectedLayerId = null,
+                isPlaying = false,
+                currentPositionMs = 0L,
                 stats = StatsInfo(
                     fps = 60,
                     frameTimeMs = 16.6f,
@@ -92,6 +109,19 @@ class StudioViewModel : ViewModel() {
                 )
             )
         }
+    }
+
+    /**
+     * The project duration is driven exclusively by real media with an intrinsic duration.
+     * Non-video sources (IMAGE/TEXT/CAMERA) and empty placeholder layers have no intrinsic
+     * duration and must never stretch the timeline by themselves. Returns 0 for an empty
+     * project so the timeline returns to its disabled/empty state when no timed media exists.
+     */
+    private fun recomputeProjectDurationMs(layers: List<Layer>): Long {
+        return layers.asSequence()
+            .filter { it.type == LayerType.VIDEO && it.durationMs > 0L }
+            .maxOfOrNull { it.durationMs }
+            ?: 0L
     }
 
     private fun pushUndoState() {
@@ -201,7 +231,20 @@ class StudioViewModel : ViewModel() {
 
     fun play() {
         if (_uiState.value.isPlaying) return
-        _uiState.update { it.copy(isPlaying = true) }
+        // Nothing to play yet: the timeline has no real content (duration 0). Do not start a
+        // fake timer or a phony playhead advance on an empty project.
+        if (_uiState.value.project.durationMs <= 0L) {
+            _uiState.update {
+                it.copy(
+                    currentPositionMs = 0L,
+                    toastMessage = "Add a video to the timeline before playing"
+                )
+            }
+            return
+        }
+        // Keep the playhead within the actual content duration before starting.
+        val clamped = _uiState.value.currentPositionMs.coerceIn(0L, _uiState.value.project.durationMs)
+        _uiState.update { it.copy(isPlaying = true, currentPositionMs = clamped) }
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
             val stepMs = 50L
@@ -371,9 +414,14 @@ class StudioViewModel : ViewModel() {
         pushUndoState()
         _uiState.update { current ->
             val updated = current.project.layers.filterNot { it.id == selectedId }
+            // Removing timed media can shrink the project: recompute the real duration and keep
+            // the playhead within it (0 when the timeline becomes empty again).
+            val newDuration = recomputeProjectDurationMs(updated)
+            val clampedPos = current.currentPositionMs.coerceIn(0L, newDuration)
             current.copy(
-                project = current.project.copy(layers = updated, isDirty = true),
+                project = current.project.copy(layers = updated, durationMs = newDuration, isDirty = true),
                 selectedLayerId = updated.lastOrNull()?.id,
+                currentPositionMs = clampedPos,
                 toastMessage = "Layer deleted"
             )
         }
@@ -1013,19 +1061,32 @@ class StudioViewModel : ViewModel() {
     fun attachRealMediaToLayer(layerId: String, uri: String, fileName: String, durationMs: Long? = null) {
         pushUndoState()
         _uiState.update { current ->
+            val layer = current.project.layers.find { it.id == layerId }
+            val isVideoTarget = layer?.type == LayerType.VIDEO
+            // Only real video carries an intrinsic duration. If the replacement is a video whose
+            // duration could not be read (null), we store 0 rather than inventing one; the caller
+            // has already surfaced the unreadable case via the toast below.
+            val resolvedDuration = if (isVideoTarget) (durationMs ?: 0L) else 0L
             val updated = current.project.layers.map {
                 if (it.id == layerId) {
                     it.copy(
                         name = fileName,
                         mediaUri = uri,
-                        durationMs = durationMs ?: it.durationMs
+                        durationMs = resolvedDuration
                     )
                 } else it
             }
-            val maxDur = maxOf(current.project.durationMs, durationMs ?: 0L)
+            val newDuration = recomputeProjectDurationMs(updated)
+            val clampedPos = current.currentPositionMs.coerceIn(0L, newDuration)
+            val toast = if (isVideoTarget && durationMs == null) {
+                "Attached $fileName (duration could not be read)"
+            } else {
+                "Attached real file: $fileName"
+            }
             current.copy(
-                project = current.project.copy(layers = updated, durationMs = maxDur, isDirty = true),
-                toastMessage = "Attached real file: $fileName"
+                project = current.project.copy(layers = updated, durationMs = newDuration, isDirty = true),
+                currentPositionMs = clampedPos,
+                toastMessage = toast
             )
         }
     }
@@ -1033,20 +1094,24 @@ class StudioViewModel : ViewModel() {
     fun addRealMediaLayer(uri: String, fileName: String, isVideo: Boolean, durationMs: Long? = null) {
         pushUndoState()
         val newLayer = if (isVideo) {
+            // Use the REAL duration read from the source. When it could not be read (null) we
+            // store 0 and report it — never silently default to a fake 3-minute clip.
             Layer(
                 name = fileName,
                 type = LayerType.VIDEO,
                 mediaUri = uri,
-                durationMs = durationMs ?: 180000L,
+                durationMs = durationMs ?: 0L,
                 transform = LayerTransform(cx = 0.5f, cy = 0.5f, w = 0.85f, h = 0.85f),
                 accentColor = 0xFF38BDF8,
                 sampleTag = "User Video"
             )
         } else {
+            // IMAGE source has no intrinsic duration: keep it at 0 and never stretch the timeline.
             Layer(
                 name = fileName,
                 type = LayerType.IMAGE,
                 mediaUri = uri,
+                durationMs = 0L,
                 transform = LayerTransform(cx = 0.5f, cy = 0.5f, w = 0.35f, h = 0.35f),
                 accentColor = 0xFF10B981,
                 sampleTag = "User Image"
@@ -1054,11 +1119,18 @@ class StudioViewModel : ViewModel() {
         }
         _uiState.update { current ->
             val updated = current.project.layers + newLayer
-            val maxDur = maxOf(current.project.durationMs, durationMs ?: 0L)
+            val newDuration = recomputeProjectDurationMs(updated)
+            val clampedPos = current.currentPositionMs.coerceIn(0L, newDuration)
+            val toast = if (isVideo && durationMs == null) {
+                "Added $fileName (video duration could not be read)"
+            } else {
+                "Added $fileName"
+            }
             current.copy(
-                project = current.project.copy(layers = updated, durationMs = maxDur, isDirty = true),
+                project = current.project.copy(layers = updated, durationMs = newDuration, isDirty = true),
                 selectedLayerId = newLayer.id,
-                toastMessage = "Added $fileName"
+                currentPositionMs = clampedPos,
+                toastMessage = toast
             )
         }
     }
@@ -1098,37 +1170,84 @@ class StudioViewModel : ViewModel() {
     }
 
     // --- Export Pipeline ---
+    //
+    // IMPORTANT: this is NOT a fake "progress 1..100 then complete" exporter. These methods only
+    // manage export STATE. The actual frame render + H.264 encode + MP4 muxing is performed by the
+    // Mp4RenderExporter, which is launched from the UI layer (which owns the Context + destination)
+    // when it observes a new [exportRequestId]. Real progress is streamed back here; success is only
+    // ever reported after the exporter has written and verified a real, non-empty file.
 
     fun quickExport() {
         startExport(ExportSettings(resolution = "720p (HD)", fps = 30, codec = "H.264 / AVC", bitrateMbps = 8.0f))
     }
 
     fun startExport(settings: ExportSettings) {
+        if (_uiState.value.isExporting) return
+        // Refuse to export an empty project up front (clear, non-fake feedback). Keep the export
+        // dialog open so the user can add a video then retry.
+        if (_uiState.value.project.durationMs <= 0L) {
+            _uiState.update {
+                it.copy(
+                    toastMessage = "Add a video to the timeline before exporting"
+                )
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 exportSettings = settings,
                 isExporting = true,
                 exportProgress = 0f,
+                exportError = null,
+                exportedSuccessPath = null,
+                exportRequestId = it.exportRequestId + 1,
                 showExportDialog = false
             )
         }
-        viewModelScope.launch {
-            for (progress in 1..100) {
-                delay(30L)
-                _uiState.update { it.copy(exportProgress = progress / 100f) }
-            }
-            _uiState.update {
-                it.copy(
-                    isExporting = false,
-                    exportedSuccessPath = "/sdcard/Movies/AhmedReactionStudio_${System.currentTimeMillis()}.mp4",
-                    toastMessage = "Export complete! Video saved to Movies"
-                )
-            }
+    }
+
+    /** User picked a destination folder (persisted SAF tree uri) from the OS picker. */
+    fun setExportFolder(treeUri: String?, displayName: String?) {
+        _uiState.update {
+            it.copy(
+                exportFolderUri = treeUri,
+                exportFolderName = displayName?.takeIf { it.isNotBlank() } ?: "Selected folder"
+            )
+        }
+    }
+
+    /** Streams real encode progress (0..1) from the exporter thread back into the UI. */
+    fun reportExportProgress(progress: Float) {
+        if (!_uiState.value.isExporting) return
+        _uiState.update { it.copy(exportProgress = progress.coerceIn(0f, 1f)) }
+    }
+
+    /** Called ONLY after the exporter wrote & verified the real MP4. */
+    fun reportExportSuccess(destinationDisplay: String) {
+        _uiState.update {
+            it.copy(
+                isExporting = false,
+                exportedSuccessPath = destinationDisplay,
+                exportError = null,
+                toastMessage = "Export complete! Video saved."
+            )
+        }
+    }
+
+    /** Called when the real export failed. Never reports success. */
+    fun reportExportError(message: String) {
+        _uiState.update {
+            it.copy(
+                isExporting = false,
+                exportedSuccessPath = null,
+                exportError = message,
+                toastMessage = message
+            )
         }
     }
 
     fun dismissExportResult() {
-        _uiState.update { it.copy(exportedSuccessPath = null) }
+        _uiState.update { it.copy(exportedSuccessPath = null, exportError = null) }
     }
 
     companion object {

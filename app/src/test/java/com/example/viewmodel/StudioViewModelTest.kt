@@ -72,6 +72,74 @@ class StudioViewModelTest {
         assertFalse(state.showStartupAspectRatioDialog)
     }
 
+    // --- Real empty-project timeline (no fake 3:24, no fake 00:14 playhead) ---
+
+    @Test
+    fun `new empty project has zero duration and zero playhead`() {
+        val viewModel = StudioViewModel()
+        val state = viewModel.uiState.value
+
+        assertEquals("A fresh project must not carry a demo duration", 0L, state.project.durationMs)
+        assertEquals("A fresh project must start the playhead at zero", 0L, state.currentPositionMs)
+        assertFalse("A fresh project must not be playing", state.isPlaying)
+        assertEquals("A fresh project must not invent timeline content", 0L, state.project.durationMs)
+    }
+
+    @Test
+    fun `playing an empty project does not start or fake a playhead`() {
+        val viewModel = StudioViewModel()
+        viewModel.play()
+        val state = viewModel.uiState.value
+        assertFalse("Play must be a no-op on an empty timeline", state.isPlaying)
+        assertEquals(0L, state.currentPositionMs)
+    }
+
+    @Test
+    fun `adding a placeholder source never invents a duration`() {
+        val viewModel = StudioViewModel()
+        viewModel.addSource(LayerType.VIDEO)
+        viewModel.addSource(LayerType.IMAGE)
+        viewModel.addSource(LayerType.TEXT)
+        val state = viewModel.uiState.value
+        // Non-real media has no intrinsic duration and must not stretch the timeline.
+        assertEquals(0L, state.project.durationMs)
+        assertEquals(3, state.project.layers.size)
+    }
+
+    @Test
+    fun `adding a real video with a real duration drives the timeline`() {
+        val viewModel = StudioViewModel()
+        viewModel.addRealMediaLayer("content://demo/video.mp4", "clip.mp4", isVideo = true, durationMs = 15000L)
+        val state = viewModel.uiState.value
+        assertEquals(15000L, state.project.durationMs)
+        val videoLayer = state.project.layers.first()
+        assertEquals(15000L, videoLayer.durationMs)
+    }
+
+    @Test
+    fun `attaching real media to an existing layer updates only that video`() {
+        val viewModel = StudioViewModel()
+        viewModel.addSource(LayerType.VIDEO)
+        val layerId = viewModel.uiState.value.project.layers.first().id
+        viewModel.attachRealMediaToLayer(layerId, "content://demo/replacement.mp4", "replacement.mp4", durationMs = 8000L)
+        val state = viewModel.uiState.value
+        assertEquals(8000L, state.project.durationMs)
+        assertEquals(8000L, state.project.layers.first().durationMs)
+        assertEquals("replacement.mp4", state.project.layers.first().name)
+    }
+
+    @Test
+    fun `removing the only timed video returns the timeline to empty`() {
+        val viewModel = StudioViewModel()
+        viewModel.addRealMediaLayer("content://demo/video.mp4", "clip.mp4", isVideo = true, durationMs = 15000L)
+        val layerId = viewModel.uiState.value.project.layers.first().id
+        viewModel.selectLayer(layerId)
+        viewModel.removeSelectedLayer()
+        val state = viewModel.uiState.value
+        assertEquals(0L, state.project.durationMs)
+        assertEquals(0L, state.currentPositionMs)
+    }
+
     // --- Full Canvas workspace = STUDIO CHROME visibility, never source visibility ---
 
     @Test
