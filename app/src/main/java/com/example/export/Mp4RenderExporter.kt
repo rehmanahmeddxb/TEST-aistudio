@@ -452,6 +452,7 @@ internal class VideoPullDecoder(private val context: Context, private val uriStr
         var lastDecodedUs = lastReturnedUs
         var inputEos = eosSent
         var guard = 100000
+        var idlePolls = 0
 
         while (lastDecodedUs < targetUs && guard-- > 0) {
             var madeProgress = false
@@ -510,17 +511,29 @@ internal class VideoPullDecoder(private val context: Context, private val uriStr
                         } finally {
                             dec.releaseOutputBuffer(outIdx, false)
                         }
-                        if (eos) return bitmap
+                        if (eos) {
+                            return bitmap ?: throw Mp4RenderExporter.ExportException(
+                                "Source video ended before a frame could be decoded."
+                            )
+                        }
                     }
                 }
                 else -> { /* no output available yet */ }
             }
 
-            // Stop if we can no longer make progress (queues full / drained) to avoid spinning.
-            if (!madeProgress) break
+            // Codec work is asynchronous even in byte-buffer mode. A single empty dequeue does not
+            // mean EOS: on the old path that made frame zero return null and every export began with
+            // a black frame. Keep waiting (the dequeue calls sleep) but retain a hard timeout.
+            if (madeProgress) {
+                idlePolls = 0
+            } else if (++idlePolls >= 125) {
+                break
+            }
         }
         lastReturnedUs = lastDecodedUs
-        return bitmap
+        return bitmap ?: throw Mp4RenderExporter.ExportException(
+            "Timed out while decoding the source video at ${targetUs / 1000L} ms."
+        )
     }
 
     /**
