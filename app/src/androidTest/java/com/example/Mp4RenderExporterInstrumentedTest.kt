@@ -9,6 +9,7 @@ import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.export.Mp4RenderExporter
+import com.example.export.VideoPullDecoder
 import com.example.model.AspectRatio
 import com.example.model.CanvasBackground
 import com.example.model.ExportSettings
@@ -64,6 +65,7 @@ class Mp4RenderExporterInstrumentedTest {
             )
             assertPlayableVideo(sourceFile, expectedWidth = 1280, expectedHeight = 720)
             assertCenterPixelIsOrange(sourceFile)
+            assertDecoderReturnsOrangeFrame(context, sourceFile)
 
             // Pass 2: exercise real MediaExtractor/MediaCodec source decoding and composition.
             exportToFile(
@@ -144,22 +146,41 @@ class Mp4RenderExporterInstrumentedTest {
         }
     }
 
+    private fun assertDecoderReturnsOrangeFrame(
+        context: android.content.Context,
+        sourceFile: File
+    ) {
+        val decoder = VideoPullDecoder(context, Uri.fromFile(sourceFile).toString())
+        try {
+            decoder.open()
+            val frame = decoder.pullFrame(0L)
+            assertNotNull("Source decoder must return its first frame", frame)
+            assertBitmapCenterIsOrange(frame!!, "direct decoder; centerYuv=${decoder.lastCenterYuv}")
+        } finally {
+            decoder.release()
+        }
+    }
+
     private fun assertCenterPixelIsOrange(file: File) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(file.absolutePath)
             val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             assertNotNull("Exported video must be decodable", frame)
-            val pixel = frame!!.getPixel(frame.width / 2, frame.height / 2)
-            val red = Color.red(pixel)
-            val green = Color.green(pixel)
-            val blue = Color.blue(pixel)
-            assertTrue(
-                "Imported source pixels were not rendered (center rgb=$red,$green,$blue)",
-                red > 140 && red > green * 3 / 2 && blue < 80
-            )
+            assertBitmapCenterIsOrange(frame!!, "exported MP4 ${file.name}")
         } finally {
             retriever.release()
         }
+    }
+
+    private fun assertBitmapCenterIsOrange(bitmap: android.graphics.Bitmap, source: String) {
+        val pixel = bitmap.getPixel(bitmap.width / 2, bitmap.height / 2)
+        val red = Color.red(pixel)
+        val green = Color.green(pixel)
+        val blue = Color.blue(pixel)
+        assertTrue(
+            "Imported source pixels were not rendered by $source (center rgb=$red,$green,$blue)",
+            red > 140 && red > green * 3 / 2 && blue < 80
+        )
     }
 }
