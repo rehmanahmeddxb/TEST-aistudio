@@ -10,7 +10,6 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
@@ -371,14 +370,14 @@ private object BitmapFactoryDecode {
 /**
  * Pull-model decoder for one source video. For each requested source timestamp it decodes forward
  * (from the current position) until it has the frame whose PTS is the closest one at or before the
- * requested time, then hands it back as an ARGB [Bitmap]. Android video decoders produce flexible
- * YUV420 buffers when rendering to an [ImageReader], so those planes are converted to ARGB while
- * respecting each plane's row/pixel stride and the image crop rectangle.
+ * requested time, then hands it back as an ARGB [Bitmap]. The codec is intentionally configured for
+ * byte-buffer output: [MediaCodec.getOutputImage] then exposes flexible YUV420 planes synchronously,
+ * avoiding Surface/ImageReader races and vendor format mismatches. The planes are converted to ARGB
+ * while respecting each plane's row/pixel stride and the image crop rectangle.
  */
 private class VideoPullDecoder(private val context: Context, private val uriString: String) {
     private var extractor: MediaExtractor? = null
     private var codec: MediaCodec? = null
-    private var imageReader: ImageReader? = null
     /** Unrotated decoder frame reused between pulls to avoid allocating a full frame each time. */
     private var rawBitmap: Bitmap? = null
     /** Frame returned to the compositor (may be [rawBitmap] or a rotation-corrected copy). */
@@ -417,19 +416,17 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
             ex.selectTrack(videoIndex)
             extractor = ex
 
-            val mime = ex.getTrackFormat(videoIndex).getString(MediaFormat.KEY_MIME)!!
-            val reader = ImageReader.newInstance(
-                if (width > 0) width else 2,
-                if (height > 0) height else 2,
-                // A decoder Surface produces flexible YUV (0x23), not RGBA (0x1). Configuring
-                // RGBA makes acquireLatestImage() throw on real Android devices/emulators.
-                ImageFormat.YUV_420_888,
-                3
+            val decodeFormat = ex.getTrackFormat(videoIndex)
+            val mime = decodeFormat.getString(MediaFormat.KEY_MIME)!!
+            // Ask for the Android-defined flexible YUV layout. getOutputImage() exposes its real
+            // row/pixel strides, so the implementation remains correct for planar and semiplanar
+            // codec buffers without relying on a vendor-specific packed byte layout.
+            decodeFormat.setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
             )
-            imageReader = reader
-
             val dec = MediaCodec.createDecoderByType(mime)
-            dec.configure(ex.getTrackFormat(videoIndex), reader.surface, null, 0)
+            dec.configure(decodeFormat, null, null, 0)
             dec.start()
             codec = dec
         } catch (e: Exception) {
@@ -481,23 +478,37 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
                     madeProgress = true
                     if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                         dec.releaseOutputBuffer(outIdx, false)
-                    } else if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        dec.releaseOutputBuffer(outIdx, false)
-                        return bitmap // reached source end for this cycle
                     } else {
-                        dec.releaseOutputBuffer(outIdx, true) // render to ImageReader
-                        val rendered = tryAcquireYuvFrame()
-                            ?: throw Mp4RenderExporter.ExportException(
-                                "The video decoder produced no readable frame at " +
-                                    "${info.presentationTimeUs / 1000L} ms."
-                            )
-                        val previous = bitmap
-                        val corrected = rotateIfNeeded(rendered)
-                        bitmap = corrected
-                        if (previous != null && previous !== rawBitmap && previous !== corrected) {
-                            previous.recycle()
+                        val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                        try {
+                            // An EOS buffer can also carry the last frame; decode it when non-empty.
+                            if (!eos || info.size > 0) {
+                                val outputImage = dec.getOutputImage(outIdx)
+                                    ?: throw Mp4RenderExporter.ExportException(
+                                        "The video decoder did not expose a YUV frame at " +
+                                            "${info.presentationTimeUs / 1000L} ms."
+                                    )
+                                val rendered = try {
+                                    readYuv420Image(outputImage, rawBitmap)
+                                } finally {
+                                    outputImage.close()
+                                }
+                                rawBitmap = rendered
+                                val previous = bitmap
+                                val corrected = rotateIfNeeded(rendered)
+                                bitmap = corrected
+                                if (previous != null &&
+                                    previous !== rawBitmap &&
+                                    previous !== corrected
+                                ) {
+                                    previous.recycle()
+                                }
+                                lastDecodedUs = info.presentationTimeUs
+                            }
+                        } finally {
+                            dec.releaseOutputBuffer(outIdx, false)
                         }
-                        lastDecodedUs = info.presentationTimeUs
+                        if (eos) return bitmap
                     }
                 }
                 else -> { /* no output available yet */ }
@@ -508,29 +519,6 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
         }
         lastReturnedUs = lastDecodedUs
         return bitmap
-    }
-
-    private fun tryAcquireYuvFrame(): Bitmap? {
-        var image: android.media.Image? = null
-        // releaseOutputBuffer(render=true) queues work to the Surface asynchronously. Ten
-        // milliseconds was not enough even on the Android emulator and caused a valid source to
-        // be silently rendered as the canvas background. Wait up to 500 ms, then fail explicitly.
-        for (attempt in 0 until 250) {
-            image = imageReader?.acquireLatestImage()
-            if (image != null) break
-            try {
-                Thread.sleep(2)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return null
-            }
-        }
-        if (image == null) return null
-        return try {
-            readYuv420Image(image, rawBitmap).also { rawBitmap = it }
-        } finally {
-            image.close()
-        }
     }
 
     /**
@@ -619,10 +607,8 @@ private class VideoPullDecoder(private val context: Context, private val uriStri
     fun release() {
         try { codec?.stop() } catch (_: Exception) {}
         try { codec?.release() } catch (_: Exception) {}
-        try { imageReader?.close() } catch (_: Exception) {}
         try { extractor?.release() } catch (_: Exception) {}
         codec = null
-        imageReader = null
         extractor = null
         if (bitmap !== rawBitmap) runCatching { bitmap?.recycle() }
         runCatching { rawBitmap?.recycle() }
