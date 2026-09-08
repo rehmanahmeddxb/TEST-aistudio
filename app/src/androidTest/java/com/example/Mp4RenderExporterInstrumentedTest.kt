@@ -6,6 +6,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.export.Mp4RenderExporter
@@ -16,6 +17,7 @@ import com.example.model.ExportSettings
 import com.example.model.Layer
 import com.example.model.LayerType
 import com.example.model.Project
+import com.example.util.ExportDestination
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -93,6 +95,67 @@ class Mp4RenderExporterInstrumentedTest {
         }
     }
 
+    @Test
+    fun exportsToDefaultMoviesAndFinalizesMediaStoreEntry() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val durationMs = 600L
+        val settings = ExportSettings(
+            resolution = "720p (HD)",
+            fps = 5,
+            codec = "H.264 / AVC",
+            bitrateMbps = 1f
+        )
+        val destination = ExportDestination.create(
+            context = context,
+            chosenFolderTreeUri = null,
+            baseName = "ReactionStudioDeviceTest"
+        )
+
+        try {
+            Mp4RenderExporter(context).export(
+                project = Project(
+                    durationMs = durationMs,
+                    aspectRatio = AspectRatio.SIXTEEN_NINE,
+                    background = CanvasBackground.ORANGE,
+                    layers = emptyList()
+                ),
+                settings = settings,
+                outPfd = destination.pfd,
+                onProgress = {}
+            )
+            destination.pfd.fileDescriptor.sync()
+            destination.pfd.close()
+            ExportDestination.finalizePending(context, destination)
+
+            assertTrue(
+                "Finalized MediaStore export must be physically non-empty",
+                ExportDestination.verifyNonEmpty(context, destination)
+            )
+            assertTrue(
+                "App-level success verification must recognize a playable MP4",
+                ExportDestination.verifyPlayableVideo(context, destination)
+            )
+            val pending = context.contentResolver.query(
+                destination.uri,
+                arrayOf(MediaStore.Video.Media.IS_PENDING),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else -1
+            }
+            assertEquals("MediaStore output must be published, not left pending", 0, pending)
+            assertPlayableVideo(
+                context,
+                destination.uri,
+                expectedWidth = 1280,
+                expectedHeight = 720
+            )
+        } finally {
+            ExportDestination.deleteOutput(context, destination)
+        }
+    }
+
     private fun exportToFile(
         context: android.content.Context,
         project: Project,
@@ -118,32 +181,55 @@ class Mp4RenderExporterInstrumentedTest {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(file.absolutePath)
-            var videoTrack = -1
-            var format: MediaFormat? = null
-            for (index in 0 until extractor.trackCount) {
-                val candidate = extractor.getTrackFormat(index)
-                if (candidate.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
-                    videoTrack = index
-                    format = candidate
-                    break
-                }
-            }
-            assertTrue("Exported MP4 must contain a video track", videoTrack >= 0)
-            assertNotNull(format)
-            assertEquals("video/avc", format!!.getString(MediaFormat.KEY_MIME))
-            assertEquals(expectedWidth, format.getInteger(MediaFormat.KEY_WIDTH))
-            assertEquals(expectedHeight, format.getInteger(MediaFormat.KEY_HEIGHT))
-
-            extractor.selectTrack(videoTrack)
-            var sampleCount = 0
-            while (extractor.sampleTime >= 0L) {
-                sampleCount++
-                if (!extractor.advance()) break
-            }
-            assertTrue("Exported MP4 must contain encoded frame samples", sampleCount > 0)
+            assertPlayableVideoTrack(extractor, expectedWidth, expectedHeight)
         } finally {
             extractor.release()
         }
+    }
+
+    private fun assertPlayableVideo(
+        context: android.content.Context,
+        uri: Uri,
+        expectedWidth: Int,
+        expectedHeight: Int
+    ) {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(context, uri, null)
+            assertPlayableVideoTrack(extractor, expectedWidth, expectedHeight)
+        } finally {
+            extractor.release()
+        }
+    }
+
+    private fun assertPlayableVideoTrack(
+        extractor: MediaExtractor,
+        expectedWidth: Int,
+        expectedHeight: Int
+    ) {
+        var videoTrack = -1
+        var format: MediaFormat? = null
+        for (index in 0 until extractor.trackCount) {
+            val candidate = extractor.getTrackFormat(index)
+            if (candidate.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
+                videoTrack = index
+                format = candidate
+                break
+            }
+        }
+        assertTrue("Exported MP4 must contain a video track", videoTrack >= 0)
+        assertNotNull(format)
+        assertEquals("video/avc", format!!.getString(MediaFormat.KEY_MIME))
+        assertEquals(expectedWidth, format.getInteger(MediaFormat.KEY_WIDTH))
+        assertEquals(expectedHeight, format.getInteger(MediaFormat.KEY_HEIGHT))
+
+        extractor.selectTrack(videoTrack)
+        var sampleCount = 0
+        while (extractor.sampleTime >= 0L) {
+            sampleCount++
+            if (!extractor.advance()) break
+        }
+        assertTrue("Exported MP4 must contain encoded frame samples", sampleCount > 0)
     }
 
     private fun assertDecoderReturnsOrangeFrame(
@@ -155,7 +241,7 @@ class Mp4RenderExporterInstrumentedTest {
             decoder.open()
             val frame = decoder.pullFrame(0L)
             assertNotNull("Source decoder must return its first frame", frame)
-            assertBitmapCenterIsOrange(frame!!, "direct decoder; centerYuv=${decoder.lastCenterYuv}")
+            assertBitmapCenterIsOrange(frame!!, "direct decoder")
         } finally {
             decoder.release()
         }

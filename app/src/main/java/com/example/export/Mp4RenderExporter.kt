@@ -388,8 +388,6 @@ internal class VideoPullDecoder(private val context: Context, private val uriStr
     private var rotationDeg = 0f
     private var width = 0
     private var height = 0
-    internal var lastCenterYuv: Triple<Int, Int, Int>? = null
-        private set
 
     fun open() {
         try {
@@ -595,9 +593,6 @@ internal class VideoPullDecoder(private val context: Context, private val uriStr
                 val y = yBuffer.get(yRow + sourceX * yPlane.pixelStride).toInt() and 0xFF
                 val u = uBuffer.get(uRow + chromaCol * uPlane.pixelStride).toInt() and 0xFF
                 val v = vBuffer.get(vRow + chromaCol * vPlane.pixelStride).toInt() and 0xFF
-                if (row == h / 2 && col == w / 2) {
-                    lastCenterYuv = Triple(y, u, v)
-                }
 
                 // BT.601 limited-range YUV -> RGB. Most AVC/HEVC decoder output uses this range;
                 // clamping also safely handles full-range sources.
