@@ -66,6 +66,36 @@ jobs:
             -Pandroid.testInstrumentationRunnerArguments.class=com.example.Mp4RenderExporterInstrumentedTest
             --stacktrace
 
+      - name: Surface instrumentation failure details
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import xml.etree.ElementTree as ET
+
+          reports = glob.glob("app/build/outputs/androidTest-results/**/*.xml", recursive=True)
+          if not reports:
+              print("::error title=Export device test failed::No Android test XML report was produced")
+          for report in reports:
+              try:
+                  root = ET.parse(report).getroot()
+              except Exception:
+                  continue
+              for case in root.iter("testcase"):
+                  problem = case.find("failure")
+                  if problem is None:
+                      problem = case.find("error")
+                  if problem is None:
+                      continue
+                  detail = (problem.get("message") or "") + "\n" + (problem.text or "")
+                  detail = detail.strip()[:12000]
+                  detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  name = case.get("name", "MP4 export smoke test")
+                  print(f"::error title={name}::{detail}")
+          PY
+
       - name: Upload instrumentation reports
         if: always()
         uses: actions/upload-artifact@v4
