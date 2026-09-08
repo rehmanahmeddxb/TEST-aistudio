@@ -2,10 +2,13 @@ package com.example
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -30,11 +33,15 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.camera.CameraManager
+import com.example.export.Mp4RenderExporter
 import com.example.model.*
 import com.example.ui.components.*
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.StudioDark
+import com.example.util.ExportDestination
 import com.example.viewmodel.StudioViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -113,6 +120,86 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
             Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
             viewModel.clearToast()
         }
+    }
+
+    // --- Export destination folder picker (Storage Access Framework). ---
+    // The user's selection is persisted as a real SAF tree Uri so export writes to the actual folder.
+    val exportFolderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        treeUri?.let {
+            // Keep access across app restarts.
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            var folderName: String? = null
+            try {
+                val docId = DocumentsContract.getTreeDocumentId(it)
+                val docUri = DocumentsContract.buildDocumentUriUsingTree(it, docId)
+                context.contentResolver.query(
+                    docUri,
+                    arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                    null, null, null
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val idx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        if (idx >= 0) folderName = c.getString(idx)
+                    }
+                }
+            } catch (_: Exception) {
+                // Fall through to default label below.
+            }
+            viewModel.setExportFolder(it.toString(), folderName)
+        }
+    }
+
+    // --- REAL export runner. ---
+    // When the ViewModel publishes a new exportRequestId (isExporting == true) we run the actual
+    // composition->encode->mux pipeline here where we have a Context. Success is only reported to
+    // the ViewModel AFTER a real, non-empty MP4 file has been verified on disk.
+    LaunchedEffect(uiState.exportRequestId) {
+        val requestId = uiState.exportRequestId
+        if (requestId <= 0 || !uiState.isExporting) return@LaunchedEffect
+
+        val appContext = context.applicationContext
+        val snapshotProject = uiState.project
+        val snapshotSettings = uiState.exportSettings
+        val folderUri = uiState.exportFolderUri
+
+        val outcome = runCatching {
+            withContext(Dispatchers.Default) {
+                val dest = ExportDestination.create(appContext, folderUri)
+                try {
+                    Mp4RenderExporter(appContext).export(
+                        project = snapshotProject,
+                        settings = snapshotSettings,
+                        outPfd = dest.pfd,
+                        onProgress = { p -> viewModel.reportExportProgress(p) }
+                    )
+                    // Flush + finalize so the file is durable and queryable.
+                    runCatching { dest.pfd.fileDescriptor.sync() }
+                    runCatching { dest.pfd.close() }
+                    ExportDestination.finalizePending(appContext, dest)
+                    if (!ExportDestination.verifyNonEmpty(appContext, dest)) {
+                        throw IllegalStateException(
+                            "Export finished but the output file is empty or missing."
+                        )
+                    }
+                    dest
+                } catch (e: Throwable) {
+                    ExportDestination.deleteOutput(appContext, dest)
+                    throw e
+                }
+            }
+        }
+
+        outcome.fold(
+            onSuccess = { dest -> viewModel.reportExportSuccess(dest.displayName) },
+            onFailure = { e -> viewModel.reportExportError(e.message ?: "Export failed.") }
+        )
     }
 
     // Auto-rotate device orientation to match selected canvas aspect ratio
@@ -223,6 +310,8 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                             onToggleSection = { viewModel.toggleSectionExpanded(it) },
                             onToggleItem = { viewModel.toggleItemExpanded(it) },
                             viewModel = viewModel,
+                            exportFolderName = uiState.exportFolderName,
+                            onChooseExportFolder = { exportFolderLauncher.launch(null) },
                             modifier = Modifier
                                 .width(sidebarWidth)
                                 .fillMaxHeight()
@@ -317,16 +406,20 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
         if (uiState.showExportDialog) {
             ExportDialog(
                 exportSettings = uiState.exportSettings,
+                destinationLabel = uiState.exportFolderName,
+                onChooseFolder = { exportFolderLauncher.launch(null) },
                 onStartExport = { viewModel.startExport(it) },
                 onDismiss = { viewModel.showExportDialog(false) }
             )
         }
 
-        if (uiState.isExporting || uiState.exportedSuccessPath != null) {
+        if (uiState.isExporting || uiState.exportedSuccessPath != null || uiState.exportError != null) {
             ExportProgressDialog(
                 progress = uiState.exportProgress,
+                isExporting = uiState.isExporting,
                 isComplete = uiState.exportedSuccessPath != null,
                 successPath = uiState.exportedSuccessPath,
+                errorMessage = uiState.exportError,
                 onDismiss = { viewModel.dismissExportResult() }
             )
         }

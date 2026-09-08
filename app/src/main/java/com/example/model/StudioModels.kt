@@ -59,7 +59,10 @@ data class Layer(
     val transform: LayerTransform = LayerTransform(),
     val textData: TextData? = null,
     val accentColor: Long = 0xFF38BDF8,
-    val durationMs: Long = 180000L,
+    // Intrinsic media duration. Only real video/screen media set this from the source file.
+    // Placeholder sources and non-video sources (IMAGE/TEXT/CAMERA) have no intrinsic
+    // duration, so the default must stay 0 — never invent a demo duration here.
+    val durationMs: Long = 0L,
     val sampleTag: String = "",
     val mediaUri: String? = null,
     val cameraFacing: CameraFacing? = null,
@@ -116,7 +119,9 @@ data class StatsInfo(
 data class Project(
     val id: String = UUID.randomUUID().toString(),
     val name: String = "Ahmed Reaction Studio",
-    val durationMs: Long = 204000L, // 3 mins 24 secs
+    // A brand-new project has no content, hence no intrinsic duration. The timeline is driven
+    // by real media (video layers) so an empty project MUST start at 0, not a demo 3:24.
+    val durationMs: Long = 0L,
     val aspectRatio: AspectRatio = AspectRatio.SIXTEEN_NINE,
     val background: CanvasBackground = CanvasBackground.DARK,
     val layers: List<Layer> = emptyList(),

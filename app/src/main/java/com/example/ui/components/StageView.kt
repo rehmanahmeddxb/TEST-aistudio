@@ -686,6 +686,9 @@ fun StageView(
 
                 Slider(
                     value = progress,
+                    // Empty projects (duration 0) have no timeline to scrub: disable seeking and
+                    // show 00:00 / 00:00 rather than pretending there is content.
+                    enabled = project.durationMs > 0L,
                     onValueChange = { frac ->
                         onSeek((frac * project.durationMs).toLong())
                     },

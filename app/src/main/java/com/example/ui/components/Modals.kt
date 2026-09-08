@@ -18,6 +18,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
@@ -157,6 +158,8 @@ fun AudioMixerDialog(
 @Composable
 fun ExportDialog(
     exportSettings: ExportSettings,
+    destinationLabel: String = "Movies (default)",
+    onChooseFolder: () -> Unit = {},
     onStartExport: (ExportSettings) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -223,6 +226,35 @@ fun ExportDialog(
                         )
                     }
                 }
+
+                // Real destination picker — writes the MP4 to the chosen SAF folder (or Movies by default).
+                Text("Destination", color = StudioTextSecondary, fontSize = 12.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = StudioAmber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = destinationLabel,
+                        color = StudioTextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = onChooseFolder,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Text("Choose Folder…", fontSize = 11.sp)
+                    }
+                }
             }
         },
         confirmButton = {
@@ -253,74 +285,108 @@ fun ExportDialog(
 @Composable
 fun ExportProgressDialog(
     progress: Float,
+    isExporting: Boolean,
     isComplete: Boolean,
     successPath: String?,
+    errorMessage: String?,
     onDismiss: () -> Unit
 ) {
+    val titleText = when {
+        isComplete -> "Export Completed!"
+        errorMessage != null -> "Export Failed"
+        else -> "Rendering Video…"
+    }
     AlertDialog(
-        onDismissRequest = { if (isComplete) onDismiss() },
+        onDismissRequest = { if (isComplete || errorMessage != null) onDismiss() },
         title = {
-            Text(
-                text = if (isComplete) "Export Completed!" else "Rendering Video…",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
+            Text(text = titleText, color = Color.White, fontWeight = FontWeight.Bold)
         },
         text = {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (!isComplete) {
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp)),
-                        color = StudioCyan,
-                        trackColor = Color.White.copy(alpha = 0.15f)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Rendering frames: ${(progress * 100).toInt()}%",
-                        color = StudioTextPrimary,
-                        fontSize = 13.sp
-                    )
-                    Text(
-                        text = "Using HW MediaCodec + EGL14 Compositor",
-                        color = StudioTextMuted,
-                        fontSize = 11.sp
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = StudioGreen,
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Video successfully generated!",
-                        color = StudioTextPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = successPath ?: "/Movies/AhmedReactionStudio.mp4",
-                        color = StudioTextMuted,
-                        fontSize = 11.sp
-                    )
+                when {
+                    errorMessage != null -> {
+                        Icon(
+                            imageVector = Icons.Default.ErrorOutline,
+                            contentDescription = null,
+                            tint = StudioRecordRed,
+                            modifier = Modifier.size(44.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = errorMessage,
+                            color = StudioTextPrimary,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "No file was created. Nothing was reported as exported.",
+                            color = StudioTextMuted,
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    isComplete -> {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = StudioGreen,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Video successfully generated!",
+                            color = StudioTextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = successPath ?: "",
+                            color = StudioTextMuted,
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    else -> {
+                        // Real encoding progress. No fake timer: the exporter only reports after it
+                        // has actually written each frame to the encoder.
+                        LinearProgressIndicator(
+                            progress = { progress.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp)),
+                            color = StudioCyan,
+                            trackColor = Color.White.copy(alpha = 0.15f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Encoding frames: ${(progress * 100).toInt()}%",
+                            color = StudioTextPrimary,
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = "Compositing layers → H.264 → MP4…",
+                            color = StudioTextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
-            if (isComplete) {
+            if (isComplete || errorMessage != null) {
                 Button(
                     onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(containerColor = StudioGreen, contentColor = Color.Black)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (errorMessage != null) StudioRecordRed else StudioGreen,
+                        contentColor = Color.Black
+                    )
                 ) {
-                    Text("Done")
+                    Text(if (errorMessage != null) "Close" else "Done")
                 }
             }
         },

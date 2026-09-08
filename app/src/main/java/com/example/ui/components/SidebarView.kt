@@ -53,6 +53,8 @@ fun SidebarView(
     onToggleSection: (String) -> Unit,
     onToggleItem: (String) -> Unit,
     viewModel: StudioViewModel,
+    exportFolderName: String = "Movies (default)",
+    onChooseExportFolder: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -1007,9 +1009,9 @@ fun SidebarView(
                     onClick = { viewModel.showExportDialog(true) }
                 )
                 SidebarActionItem(
-                    label = "Save Folder: /Movies",
+                    label = "Export Folder: $exportFolderName",
                     icon = Icons.Default.FolderSpecial,
-                    onClick = { viewModel.saveProject() }
+                    onClick = { onChooseExportFolder() }
                 )
                 SidebarActionItem(
                     label = "About Ahmed Reaction Studio",
