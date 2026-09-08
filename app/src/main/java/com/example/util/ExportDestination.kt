@@ -2,6 +2,8 @@ package com.example.util
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -152,18 +154,63 @@ object ExportDestination {
         }
     }
 
+    /**
+     * Opens the finalized output through Android's own MP4 extractor and requires at least one
+     * encoded sample in a dimensioned video track. A byte-count check alone can accept a corrupt or
+     * header-only file, which would make the UI report a false success.
+     */
+    fun verifyPlayableVideo(context: Context, result: Result): Boolean {
+        val extractor = MediaExtractor()
+        return try {
+            if (result.uri.scheme == "file") {
+                extractor.setDataSource(result.uri.path ?: return false)
+            } else {
+                extractor.setDataSource(context, result.uri, null)
+            }
+
+            var videoTrack = -1
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME)
+                if (mime?.startsWith("video/") == true &&
+                    format.containsKey(MediaFormat.KEY_WIDTH) &&
+                    format.containsKey(MediaFormat.KEY_HEIGHT) &&
+                    format.getInteger(MediaFormat.KEY_WIDTH) > 0 &&
+                    format.getInteger(MediaFormat.KEY_HEIGHT) > 0
+                ) {
+                    videoTrack = index
+                    break
+                }
+            }
+            if (videoTrack < 0) return false
+            extractor.selectTrack(videoTrack)
+            extractor.sampleTime >= 0L
+        } catch (_: Exception) {
+            false
+        } finally {
+            extractor.release()
+        }
+    }
+
     /** After a successful default-Movies export, removes the IS_PENDING marker so the file is final. */
     fun finalizePending(context: Context, result: Result) {
         if (!result.needsPendingFinalize || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-        context.contentResolver.update(result.uri, values, null, null)
+        val updated = context.contentResolver.update(result.uri, values, null, null)
+        if (updated <= 0) {
+            throw IllegalStateException("The exported MP4 could not be published to Movies.")
+        }
     }
 
     /** Closes and deletes a (possibly partial/failed) output file. Best-effort. */
     fun deleteOutput(context: Context, result: Result?) {
         result ?: return
         runCatching { result.pfd.close() }
-        runCatching { context.contentResolver.delete(result.uri, null, null) }
+        if (result.uri.scheme == "file") {
+            result.uri.path?.let { path -> runCatching { File(path).delete() } }
+        } else {
+            runCatching { context.contentResolver.delete(result.uri, null, null) }
+        }
     }
 
     private fun timestamp(): String =

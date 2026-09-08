@@ -159,7 +159,7 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
     // --- REAL export runner. ---
     // When the ViewModel publishes a new exportRequestId (isExporting == true) we run the actual
     // composition->encode->mux pipeline here where we have a Context. Success is only reported to
-    // the ViewModel AFTER a real, non-empty MP4 file has been verified on disk.
+    // the ViewModel AFTER Android verifies a real MP4 video track with encoded samples.
     LaunchedEffect(uiState.exportRequestId) {
         val requestId = uiState.exportRequestId
         if (requestId <= 0 || !uiState.isExporting) return@LaunchedEffect
@@ -183,9 +183,9 @@ fun StudioScreen(viewModel: StudioViewModel = viewModel(), splashVisible: Boolea
                     runCatching { dest.pfd.fileDescriptor.sync() }
                     runCatching { dest.pfd.close() }
                     ExportDestination.finalizePending(appContext, dest)
-                    if (!ExportDestination.verifyNonEmpty(appContext, dest)) {
+                    if (!ExportDestination.verifyPlayableVideo(appContext, dest)) {
                         throw IllegalStateException(
-                            "Export finished but the output file is empty or missing."
+                            "Export finished but Android could not open the output as a playable video."
                         )
                     }
                     dest
