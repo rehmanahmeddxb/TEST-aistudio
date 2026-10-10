@@ -1,0 +1,96 @@
+name: Build Child, Parent APKs and Backend Bundle
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  CONFIGURATION: 'Release'
+
+jobs:
+  build-child:
+    name: Build Child APK
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-android
+
+      - name: Restore
+        run: dotnet restore ChildApp/ChildApp.csproj
+
+      - name: Publish Child APK
+        run: dotnet publish ChildApp/ChildApp.csproj -f net8.0-android -c ${{ env.CONFIGURATION }} -p:AndroidPackageFormat=apk -o ./out-child
+
+      - name: Upload Child APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: child-apk
+          path: ./out-child/**/*.apk
+          if-no-files-found: error
+
+  build-parent:
+    name: Build Parent APK
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-android
+
+      - name: Restore
+        run: dotnet restore ParentApp/ParentApp.csproj
+
+      - name: Publish Parent APK
+        run: dotnet publish ParentApp/ParentApp.csproj -f net8.0-android -c ${{ env.CONFIGURATION }} -p:AndroidPackageFormat=apk -o ./out-parent
+
+      - name: Upload Parent APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: parent-apk
+          path: ./out-parent/**/*.apk
+          if-no-files-found: error
+
+  package-backend:
+    name: Package Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (sanity check)
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create backend zip
+        run: |
+          cd backend
+          zip -r ../backend.zip . -x "*.db" -x "__pycache__/*"
+
+      - name: Upload Backend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-bundle
+          path: backend.zip
+          if-no-files-found: error
