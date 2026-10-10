@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="ChildApp.MainPage"
+             Title="Child Tracker">
+    <VerticalStackLayout Padding="24" Spacing="16">
+        <Label Text="Child Sync Service" FontSize="24" FontAttributes="Bold" />
+        <Label x:Name="StatusLabel" Text="Ready." />
+        <Button x:Name="SyncButton" Text="Sync Now" Clicked="OnSyncClicked" />
+    </VerticalStackLayout>
+</ContentPage>
